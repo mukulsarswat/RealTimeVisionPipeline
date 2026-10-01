@@ -39,6 +39,9 @@ int main()
     double totalCannyTime = 0.0;
     int cannySamples = 0;
 
+    double totalClaheTime = 0.0;
+    int claheSamples = 0;
+
     while (true)
     {
 
@@ -75,10 +78,7 @@ int main()
         grayFrame.convertTo(
             normalizedFrame,
             CV_32F,
-            1.0 / 255.0
-        );
-
-     
+            1.0 / 255.0);
 
         auto grayEnd = std::chrono::steady_clock::now();
 
@@ -96,15 +96,14 @@ int main()
             grayFrame,
             blurredFrame,
             cv::Size(5, 5),
-            0
-        );
+            0);
 
         auto blurEnd = std::chrono::steady_clock::now();
 
         double blurTime =
             std::chrono::duration<double, std::milli>(
-                blurEnd - blurStart
-            ).count();
+                blurEnd - blurStart)
+                .count();
         totalBlurTime += blurTime;
         blurSamples++;
 
@@ -115,17 +114,37 @@ int main()
             blurredFrame,
             edges,
             50,
-            150
-        );
-        
+            150);
+
         auto cannyEnd = std::chrono::steady_clock::now();
         double cannyTime =
             std::chrono::duration<double, std::milli>(
-                cannyEnd - cannyStart
-            ).count();
+                cannyEnd - cannyStart)
+                .count();
         totalCannyTime += cannyTime;
         cannySamples++;
 
+        cv::Mat enhancedFrame;
+        cv::Ptr<cv::CLAHE> clahe =
+            cv::createCLAHE();
+
+        clahe->setClipLimit(4.0);
+        clahe->setTilesGridSize(cv::Size(8, 8));
+        auto claheStart = std::chrono::steady_clock::now();
+
+        clahe->apply(
+            grayFrame,
+            enhancedFrame);
+        auto claheEnd =
+            std::chrono::steady_clock::now();
+
+        double claheTime =
+            std::chrono::duration<double, std::milli>(
+                claheEnd - claheStart)
+                .count();
+
+        totalClaheTime += claheTime;
+        claheSamples++;
 
         if (frame.empty())
         {
@@ -136,23 +155,23 @@ int main()
 
         // Inspect the first frame
         if (firstFrame)
-        {   std::cout << "\n--- Original Frame ---\n";
+        {
+            std::cout << "\n--- Original Frame ---\n";
 
             std::cout << "Width: "
                       << frame.cols << std::endl;
 
             std::cout << "Height: "
                       << frame.rows << std::endl;
-            
+
             std::cout << "Channels: "
                       << frame.channels() << std::endl;
 
             std::cout << "Total pixels: "
                       << frame.total() << std::endl;
-            
+
             std::cout << "Type: "
                       << frame.type() << std::endl;
-
 
             std::cout << "\n--- Frame Information ---\n";
 
@@ -171,7 +190,6 @@ int main()
             std::cout << "Type: "
                       << resizedFrame.type() << std::endl;
 
-
             std::cout << "\n--- Grayscale Frame ---\n";
 
             std::cout << "Width: "
@@ -182,7 +200,7 @@ int main()
 
             std::cout << "Channels: "
                       << grayFrame.channels() << std::endl;
-            
+
             std::cout << "Total pixels: "
                       << grayFrame.total() << std::endl;
 
@@ -195,13 +213,13 @@ int main()
             std::cout << "Height: "
                       << normalizedFrame.rows << std::endl;
             std::cout << "Channels: "
-                        << normalizedFrame.channels() << std::endl;
+                      << normalizedFrame.channels() << std::endl;
             std::cout << "Total pixels: "
                       << normalizedFrame.total() << std::endl;
             std::cout << "Type: "
-                      << normalizedFrame.type() << std::endl<<std::endl;
-            
-            
+                      << normalizedFrame.type() << std::endl
+                      << std::endl;
+
             cv::Vec3b pixelOriginal = frame.at<cv::Vec3b>(0, 0);
             std::cout << "Pixel [0,0](for original frame): "
                       << "B=" << static_cast<int>(pixelOriginal[0])
@@ -217,13 +235,13 @@ int main()
                       << " G=" << static_cast<int>(pixel[1])
                       << " R=" << static_cast<int>(pixel[2])
                       << std::endl;
-            
+
             unsigned char pixelGray = grayFrame.at<unsigned char>(0, 0);
 
             std::cout << "Pixel [0,0](for grayscale frame): "
                       << "Gray=" << static_cast<int>(pixelGray)
                       << std::endl;
-            
+
             std::cout << "Pixel [0,0](for normalized grayscale frame): "
                       << "Gray=" << normalizedFrame.at<float>(0, 0)
                       << std::endl;
@@ -232,7 +250,7 @@ int main()
         }
 
         // Display live camera
-        cv::imshow("Real-Time Vision Pipeline", edges);
+        cv::imshow("Real-Time Vision Pipeline", enhancedFrame);
 
         char key = static_cast<char>(cv::waitKey(1));
         auto currentTime = std::chrono::steady_clock::now();
@@ -291,12 +309,20 @@ int main()
                       << averageBlurTime
                       << " ms"
                       << std::endl;
-            
+
             double averageCannyTime =
-                totalCannyTime / cannySamples; 
-            
+                totalCannyTime / cannySamples;
+
             std::cout << " | Avg Canny: "
                       << averageCannyTime
+                      << " ms"
+                      << std::endl;
+
+            double averageClaheTime =
+                totalClaheTime / claheSamples;
+
+            std::cout << " | Avg CLAHE: "
+                      << averageClaheTime
                       << " ms"
                       << std::endl;
 
@@ -306,13 +332,15 @@ int main()
             blurSamples = 0;
             totalCannyTime = 0.0;
             cannySamples = 0;
+            totalClaheTime = 0.0;
+            claheSamples = 0;
         }
 
         // Save frame
         if (key == 's')
         {
-            cv::imwrite("captured_frame_canny(50,150).jpg", edges);
-            std::cout << "Frame saved as captured_frame_canny(50,150).jpg"
+            cv::imwrite("enhanced_frame_CLAHE(4,8X8).jpg", enhancedFrame);
+            std::cout << "Frame saved as enhanced_frame_CLAHE(4,8X8).jpg"
                       << std::endl;
         }
 
