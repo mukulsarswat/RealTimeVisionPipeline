@@ -80,19 +80,19 @@ The live application currently uses `cv::Canny(blurredFrame, edges, 50, 150)`. T
 
 ### Thresholds 25 and 75
 
-![Canny edge result with lower threshold 25 and upper threshold 75](<captured_frame_canny(25,75).jpg>)
+![Canny edge result with lower threshold 25 and upper threshold 75](<assets/frames/captured_frame_canny(25,75).jpg>)
 
 The lower pair is more sensitive to weak gradients, so more fine details and weaker boundaries survive. It can also retain more texture or noise as edges.
 
 ### Thresholds 50 and 150
 
-![Canny edge result with lower threshold 50 and upper threshold 150](<captured_frame_canny(50,150).jpg>)
+![Canny edge result with lower threshold 50 and upper threshold 150](<assets/frames/captured_frame_canny(50,150).jpg>)
 
 This is the threshold pair used by the live pipeline. It balances weaker connected details against suppression of low-strength responses in this sample.
 
 ### Thresholds 100 and 200
 
-![Canny edge result with lower threshold 100 and upper threshold 200](<captured_frame_canny(100,200).jpg>)
+![Canny edge result with lower threshold 100 and upper threshold 200](<assets/frames/captured_frame_canny(100,200).jpg>)
 
 The higher pair is more selective: weak edges are removed, leaving fewer, stronger contours. Some useful low-contrast detail may disappear as well.
 
