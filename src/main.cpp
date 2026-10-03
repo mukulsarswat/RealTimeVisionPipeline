@@ -1,6 +1,7 @@
 #include <iostream>
 #include <chrono>
 #include <opencv2/opencv.hpp>
+#include <vector>
 
 int main()
 {
@@ -142,9 +143,93 @@ int main()
             std::chrono::duration<double, std::milli>(
                 claheEnd - claheStart)
                 .count();
-
         totalClaheTime += claheTime;
         claheSamples++;
+
+        cv::Mat hsvFrame;
+
+        cv::cvtColor(
+            resizedFrame,
+            hsvFrame,
+            cv::COLOR_BGR2HSV);
+
+        cv::Mat labFrame;
+        cv::cvtColor(
+            resizedFrame,
+            labFrame,
+            cv::COLOR_BGR2Lab);
+
+        std::vector<cv::Mat> labChannels;
+        cv::split(
+            labFrame,
+            labChannels);
+        cv::Mat enhancedL;
+        clahe->apply(
+            labChannels[0],
+            enhancedL);
+
+        std::vector<cv::Mat> enhancedLabChannels = {
+            enhancedL,
+            labChannels[1],
+            labChannels[2]};
+
+        cv::Mat enhancedLabFrame;
+        cv::merge(
+            enhancedLabChannels,
+            enhancedLabFrame);
+        cv::Mat enhancedBGR;
+        cv::cvtColor(
+            enhancedLabFrame,
+            enhancedBGR,
+            cv::COLOR_Lab2BGR);
+        cv::Scalar originalMean;
+        cv::Scalar originalStdDev;
+
+        cv::Scalar enhancedMean;
+        cv::Scalar enhancedStdDev;
+
+        cv::meanStdDev(
+            labChannels[0],
+            originalMean,
+            originalStdDev);
+
+        cv::meanStdDev(
+            enhancedL,
+            enhancedMean,
+            enhancedStdDev);
+
+        cv::Mat originalHist;
+        cv::Mat enhancedHist;
+        int histSize = 256;
+
+        float range[] = {0, 256};
+        const float *histRange = {range};
+
+        cv::calcHist(
+            &labChannels[0],
+            1,
+            nullptr,
+            cv::Mat(),
+            originalHist,
+            1,
+            &histSize,
+            &histRange);
+
+        cv::calcHist(
+            &enhancedL,
+            1,
+            nullptr,
+            cv::Mat(),
+            enhancedHist,
+            1,
+            &histSize,
+            &histRange);
+        int ranges[][2] = {
+            {0, 49},
+            {50, 99},
+            {100, 149},
+            {150, 199},
+            {200, 255}};
 
         if (frame.empty())
         {
@@ -220,8 +305,72 @@ int main()
                       << normalizedFrame.type() << std::endl
                       << std::endl;
 
+            std::cout << "\n--- HSV Frame ---\n";
+
+            std::cout << "Width: "
+                      << hsvFrame.cols << std::endl;
+
+            std::cout << "Height: "
+                      << hsvFrame.rows << std::endl;
+
+            std::cout << "Channels: "
+                      << hsvFrame.channels() << std::endl;
+
+            std::cout << "Type: "
+                      << hsvFrame.type() << std::endl;
+
+            std::cout << "\n--- LAB Frame ---\n";
+
+            std::cout << "Width: "
+                      << labFrame.cols << std::endl;
+
+            std::cout << "Height: "
+                      << labFrame.rows << std::endl;
+
+            std::cout << "Channels: "
+                      << labFrame.channels() << std::endl;
+
+            std::cout << "Type: "
+                      << labFrame.type() << std::endl;
+            std::cout << "\n--- Histogram Comparison ---\n";
+
+            for (int i = 0; i < 5; i++)
+            {
+
+                int start = ranges[i][0];
+                int end = ranges[i][1];
+
+                float originalCount = 0.0f;
+                float enhancedCount = 0.0f;
+
+                for (int j = start; j <= end; j++)
+                {
+                    originalCount += originalHist.at<float>(j);
+                    enhancedCount += enhancedHist.at<float>(j);
+                }
+
+                std::cout << start << "-" << end
+                          << " | Original: " << originalCount
+                          << " | Enhanced: " << enhancedCount
+                          << std::endl;
+            }
+
+            std::cout << "\n--- L Channel Statistics ---\n";
+
+            std::cout << "Original Mean: "
+                      << originalMean[0] << std::endl;
+
+            std::cout << "Original StdDev: "
+                      << originalStdDev[0] << std::endl;
+
+            std::cout << "Enhanced Mean: "
+                      << enhancedMean[0] << std::endl;
+
+            std::cout << "Enhanced StdDev: "
+                      << enhancedStdDev[0] << std::endl;
+
             cv::Vec3b pixelOriginal = frame.at<cv::Vec3b>(0, 0);
-            std::cout << "Pixel [0,0](for original frame): "
+            std::cout << "\n Pixel [0,0](for original frame): "
                       << "B=" << static_cast<int>(pixelOriginal[0])
                       << " G=" << static_cast<int>(pixelOriginal[1])
                       << " R=" << static_cast<int>(pixelOriginal[2])
@@ -246,11 +395,26 @@ int main()
                       << "Gray=" << normalizedFrame.at<float>(0, 0)
                       << std::endl;
 
+            cv::Vec3b hsvPixel =
+                hsvFrame.at<cv::Vec3b>(0, 0);
+
+            std::cout << "Pixel [0,0](for HSV frame): "
+                      << "H=" << static_cast<int>(hsvPixel[0])
+                      << " S=" << static_cast<int>(hsvPixel[1])
+                      << " V=" << static_cast<int>(hsvPixel[2])
+                      << std::endl;
+
+            std::cout << "Pixel [0,0](for LAB frame): "
+                      << "L=" << static_cast<int>(labFrame.at<cv::Vec3b>(0, 0)[0])
+                      << " A=" << static_cast<int>(labFrame.at<cv::Vec3b>(0, 0)[1])
+                      << " B=" << static_cast<int>(labFrame.at<cv::Vec3b>(0, 0)[2])
+                      << std::endl;
+
             firstFrame = false;
         }
 
         // Display live camera
-        cv::imshow("Real-Time Vision Pipeline", enhancedFrame);
+        cv::imshow("Real-Time Vision Pipeline", enhancedBGR);
 
         char key = static_cast<char>(cv::waitKey(1));
         auto currentTime = std::chrono::steady_clock::now();
@@ -339,8 +503,8 @@ int main()
         // Save frame
         if (key == 's')
         {
-            cv::imwrite("enhanced_frame_CLAHE(4,8X8).jpg", enhancedFrame);
-            std::cout << "Frame saved as enhanced_frame_CLAHE(4,8X8).jpg"
+            cv::imwrite("original_frame_BGR.jpg", resizedFrame);
+            std::cout << "Frame saved as original_frame_BGR.jpg"
                       << std::endl;
         }
 
