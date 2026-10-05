@@ -8,16 +8,28 @@ The application is implemented in [`src/main.cpp`](src/main.cpp) and runs the fo
 
 1. **Camera acquisition**: `cv::VideoCapture cap(0)` opens camera device 0. `cap >> frame` retrieves a frame. `Avg Capture` measures this camera read only.
 2. **Original-frame inspection**: on the first valid frame, the program prints its width, height, channel count, pixel count, OpenCV matrix type, and the BGR values at pixel `[0,0]`.
-3. **Resize**: `cv::resize(frame, resizedFrame, cv::Size(640, 360))` creates a 640×360 color image. This is a fixed output size rather than an aspect-ratio-preserving fit.
+3. **Preprocess**: `preprocessFrame()` composes `resizeFrame()` with `enhanceWithCLAHE()`. It resizes the camera image once to 640×360, converts it to Lab, enhances the L channel, and returns the enhanced BGR image along with intermediate matrices used by diagnostics.
 4. **Grayscale and normalization**: `cv::cvtColor(resizedFrame, grayFrame, cv::COLOR_BGR2GRAY)` converts BGR to one-channel grayscale. `grayFrame.convertTo(normalizedFrame, CV_32F, 1.0 / 255.0)` creates a floating-point grayscale image scaled to `[0,1]` for inspection. In the current code, the blur and Canny stages use `grayFrame`, not `normalizedFrame`.
 5. **Gaussian smoothing**: `cv::GaussianBlur(grayFrame, blurredFrame, cv::Size(5, 5), 0)` applies a 5×5 Gaussian kernel before edge detection. The zero sigma lets OpenCV derive the Gaussian standard deviation from the kernel size.
 6. **Canny edge detection**: `cv::Canny(blurredFrame, edges, 50, 150)` produces a single-channel binary edge map for comparison and downstream use.
-7. **Grayscale CLAHE timing**: `cv::createCLAHE()` creates a Contrast Limited Adaptive Histogram Equalization processor. The code sets clip limit `4.0`, configures an `8×8` tile grid, and applies it to `grayFrame`. This first CLAHE call is timed and recorded as `Avg CLAHE`; it is a profiling pass, not the displayed output.
+7. **Grayscale CLAHE timing**: `cv::createCLAHE(2.0, cv::Size(8, 8))` creates a Contrast Limited Adaptive Histogram Equalization processor with clip limit `2.0` and an `8×8` tile grid. The first CLAHE call applies it to `grayFrame` and is timed as `Avg CLAHE`; this profiling pass is separate from the Lab enhancement used for display.
 8. **Color-space conversion**: `cv::cvtColor` also creates HSV (`cv::COLOR_BGR2HSV`) and CIE Lab (`cv::COLOR_BGR2Lab`) representations from the resized BGR frame.
 9. **Lab lightness enhancement and histogram analysis**: the Lab image is split into channels, CLAHE is applied to its L channel, and the enhanced L channel is merged with the original a/b channels before conversion back to BGR. This second CLAHE application is not included in `Avg CLAHE`. `cv::calcHist` builds 256-bin histograms for the original and enhanced L channels; `cv::meanStdDev` computes their mean and standard deviation.
 10. **Display and keyboard input**: `cv::imshow` displays the CLAHE-enhanced Lab image converted back to BGR. `cv::waitKey(1)` processes window events and checks for `s` or `q`.
 11. **Optional save**: pressing `s` currently writes the resized BGR input to `original_frame_BGR.jpg` in the process's working directory.
 12. **Shutdown**: pressing `q` exits the loop; `cap.release()` and `cv::destroyAllWindows()` release the camera and display resources.
+
+## Engineering Tips: Function Composition
+
+The pipeline keeps small, focused functions outside `main()` and composes them into a higher-level operation:
+
+```text
+preprocessFrame(frame)
+  ├── resizeFrame(frame, 640, 360)
+  └── enhanceWithCLAHE(resizedFrame)
+```
+
+This keeps each image-processing step understandable while giving `main()` a clear description of the per-frame workflow. Reuse the resized frame for later color-space conversions instead of resizing the original frame again; duplicate image work adds latency to every frame. Measure the composed call once when reporting preprocessing time so the metric reflects the work actually performed. For incremental learning, introduce one small function at a time and preserve the existing standalone-function structure; a class is only useful when shared state or object ownership makes it clearer.
 
 ## OpenCV API Used
 
@@ -29,7 +41,7 @@ The application is implemented in [`src/main.cpp`](src/main.cpp) and runs the fo
 - `cv::Mat::convertTo` converts image depth and optionally scales pixel values; `CV_32F` selects 32-bit floating point, and the scale `1.0 / 255.0` normalizes 8-bit grayscale values to `[0,1]`.
 - `cv::GaussianBlur` reduces high-frequency noise before edge detection; `cv::Size(5, 5)` sets the kernel dimensions and `sigmaX=0` asks OpenCV to derive sigma from the kernel.
 - `cv::Canny` detects edges using gradient magnitude, non-maximum suppression, and two-threshold hysteresis. The live pipeline calls it with thresholds `50` and `150`.
-- `cv::createCLAHE` creates a CLAHE processor. `setClipLimit` controls contrast limiting, `setTilesGridSize(cv::Size(8, 8))` configures the local tile grid, and `apply` produces the contrast-enhanced output. The live display comes from the separate CLAHE application on Lab L, converted back to BGR.
+- `cv::createCLAHE` creates a CLAHE processor. The current code uses clip limit `2.0` and an `8×8` tile grid; `apply` produces the contrast-enhanced output. The live display comes from the separate CLAHE application on Lab L, converted back to BGR.
 - `cv::COLOR_BGR2HSV`, `cv::COLOR_BGR2Lab`, and `cv::COLOR_Lab2BGR` convert between BGR, HSV, and Lab color spaces. Lab separates lightness (L) from chromatic a/b components, allowing contrast enhancement on L while preserving the original color channels.
 - `cv::split` separates a multi-channel matrix into individual channel matrices; `cv::merge` combines channel matrices back into a multi-channel image.
 - `cv::calcHist` computes a histogram. In this project it receives one 8-bit L channel, one channel index, no mask, an empty output accumulator, 256 bins, and a value range `[0, 256)`. Each bin counts pixels for an L intensity.
@@ -86,18 +98,18 @@ The image is reduced from 1280×720 to 640×360 while retaining three BGR channe
 
 ![Grayscale 640 by 360 frame](assets/frames/captured_frame_grayscale.jpg)
 
-The frame remains 640×360, but BGR color has been converted to one grayscale channel using `cv::cvtColor` and `cv::COLOR_BGR2GRAY`. It is the input to Gaussian blur, Canny, and CLAHE. The live window shows the CLAHE-enhanced grayscale output.
+The frame remains 640×360, but BGR color has been converted to one grayscale channel using `cv::cvtColor` and `cv::COLOR_BGR2GRAY`. It is the input to Gaussian blur, Canny, and the grayscale CLAHE profiling pass. The live window shows the separate Lab-lightness-enhanced result converted back to BGR.
 
 ## CLAHE
 
-Contrast Limited Adaptive Histogram Equalization (CLAHE) improves local contrast rather than applying one global histogram adjustment to the whole image. It divides the grayscale image into tiles, equalizes each tile's histogram, limits histogram amplification using a clip limit, and interpolates across tile boundaries to avoid visible seams. In this pipeline, the tile grid is `8×8` and CLAHE is applied directly to `grayFrame` using `cv::createCLAHE`, `setClipLimit`, `setTilesGridSize`, and `apply`. A second application enhances only the L channel of the Lab image; the original Lab a/b channels are retained to preserve color when converting the result back to BGR for display.
+Contrast Limited Adaptive Histogram Equalization (CLAHE) improves local contrast rather than applying one global histogram adjustment to the whole image. It divides the image into tiles, equalizes each tile's histogram, limits histogram amplification using a clip limit, and interpolates across tile boundaries to avoid visible seams. In this pipeline, the processor uses clip limit `2.0` and an `8×8` tile grid and is applied to `grayFrame` for timing. A second application enhances only the L channel of the Lab image; the original Lab a/b channels are retained to preserve color when converting the result back to BGR for display.
 
 The clip limit controls how much local histogram peaks can be amplified. With the same image and `8×8` grid, increasing it from 2 to 4 to 8 produces progressively stronger local contrast. A higher value can reveal details in dark or bright local regions, but also makes sensor noise and texture more visible. The effect depends on the input image; the clip-limit value is not a direct contrast multiplier.
 
 | Clip limit 2 | Clip limit 4 | Clip limit 8 |
 | --- | --- | --- |
 | <img src="assets/frames/enhanced_frame_CLAHE(2,8X8).jpg" alt="CLAHE output with clip limit 2 and an 8 by 8 tile grid" width="240"> | <img src="assets/frames/enhanced_frame_CLAHE(4,8X8).jpg" alt="CLAHE output with clip limit 4 and an 8 by 8 tile grid" width="240"> | <img src="assets/frames/enhanced_frame_CLAHE(8,8X8).jpg" alt="CLAHE output with clip limit 8 and an 8 by 8 tile grid" width="240"> |
-| Lower, more restrained local contrast; less noise amplification. | Stronger local contrast; the setting used by the current pipeline. | Strongest local contrast of these examples; fine texture and noise are more pronounced. |
+| Lower, more restrained local contrast; the setting used by the current pipeline. | Stronger local contrast. | Strongest local contrast of these examples; fine texture and noise are more pronounced. |
 
 ```text
 FPS: 30.1858 | Avg Capture: 17.7814 ms | Avg Grayscale: 0.144911 ms | Avg Blur: 0.128394 ms
@@ -144,4 +156,4 @@ cmake --build build
 
 When using VS Code with CMake Tools, configure the CMake project so the OpenCV include directories and libraries from `find_package(OpenCV REQUIRED)` are passed to the target.
 
-In the OpenCV window, press `s` to save the displayed CLAHE-enhanced grayscale frame or `q` to quit. The camera must be accessible to the application; on macOS, grant camera permission to the terminal or application launching it.
+In the OpenCV window, press `s` to save the resized BGR input frame or `q` to quit. The camera must be accessible to the application; on macOS, grant camera permission to the terminal or application launching it.
