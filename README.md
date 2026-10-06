@@ -1,6 +1,6 @@
 # Real-Time Vision Pipeline
 
-A small C++17 and OpenCV application that reads frames from the default camera, resizes and preprocesses them, explores BGR/HSV/Lab color spaces, measures Lab-channel histograms, detects edges with Canny, enhances local contrast with CLAHE, and reports timing and frame-rate measurements.
+A small C++17 application using OpenCV and ONNX Runtime. It reads frames from the default camera, runs YOLO inference, explores BGR/HSV/Lab color spaces, measures Lab-channel histograms, detects edges with Canny, enhances local contrast with CLAHE, and reports timing and frame-rate measurements.
 
 ## Pipeline
 
@@ -15,9 +15,26 @@ The application is implemented in [`src/main.cpp`](src/main.cpp) and runs the fo
 7. **Grayscale CLAHE timing**: `cv::createCLAHE(2.0, cv::Size(8, 8))` creates a Contrast Limited Adaptive Histogram Equalization processor with clip limit `2.0` and an `8×8` tile grid. The first CLAHE call applies it to `grayFrame` and is timed as `Avg CLAHE`; this profiling pass is separate from the Lab enhancement used for display.
 8. **Color-space conversion**: `cv::cvtColor` also creates HSV (`cv::COLOR_BGR2HSV`) and CIE Lab (`cv::COLOR_BGR2Lab`) representations from the resized BGR frame.
 9. **Lab lightness enhancement and histogram analysis**: the Lab image is split into channels, CLAHE is applied to its L channel, and the enhanced L channel is merged with the original a/b channels before conversion back to BGR. This second CLAHE application is not included in `Avg CLAHE`. `cv::calcHist` builds 256-bin histograms for the original and enhanced L channels; `cv::meanStdDev` computes their mean and standard deviation.
-10. **Display and keyboard input**: `cv::imshow` displays the CLAHE-enhanced Lab image converted back to BGR. `cv::waitKey(1)` processes window events and checks for `s` or `q`.
-11. **Optional save**: pressing `s` currently writes the resized BGR input to `original_frame_BGR.jpg` in the process's working directory.
-12. **Shutdown**: pressing `q` exits the loop; `cap.release()` and `cv::destroyAllWindows()` release the camera and display resources.
+10. **YOLO inference**: the raw camera frame is resized to 640×640, converted from BGR to RGB, scaled to float values in `[0,1]`, and packed as NCHW before it is passed to the ONNX Runtime session. This inference input is separate from the 640×360 CLAHE and edge-processing pipeline described above.
+11. **Display and keyboard input**: `cv::imshow` displays the CLAHE-enhanced Lab image converted back to BGR. `cv::waitKey(1)` processes window events and checks for `s` or `q`.
+12. **Optional save**: pressing `s` currently writes the resized BGR input to `original_frame_BGR.jpg` in the process's working directory.
+13. **Shutdown**: pressing `q` exits the loop; `cap.release()` and `cv::destroyAllWindows()` release the camera and display resources.
+
+## YOLO and ONNX Inference
+
+The application creates an ONNX Runtime session from `../yolo26n.onnx` relative to the process's working directory. The model file must be present at that path. The session's first input and output names are queried from the model rather than hard-coded.
+
+For every captured frame, the YOLO input is prepared independently of the CLAHE-enhanced display pipeline:
+
+1. Resize the original OpenCV BGR camera frame directly to 640×640. This stretches the image to a square; it does not preserve aspect ratio with letterboxing.
+2. Convert the resized image from BGR to RGB.
+3. Convert the 8-bit channel values to 32-bit floating point and divide by 255, giving values in `[0,1]`.
+4. Reorder the pixels from interleaved HWC layout (height, width, channels) to planar CHW layout (channels, height, width).
+5. Wrap those values in a float tensor with shape **`[1, 3, 640, 640]`** (batch, channels, height, width) and run the ONNX session.
+
+The code assumes the model's output is a float tensor shaped **`[1, 84, 8400]`**: 84 channels for each of 8,400 candidate predictions. It treats channels 0–3 as four box values and channels 4–83 as 80 class scores. For the first captured frame only, it scans all 8,400 candidates and their 80 class scores, then reports the candidate and class with the highest score, along with that score and the candidate's four raw box values.
+
+This is a minimal output inspection, not a complete detector post-processing pipeline. It does not apply a confidence threshold or non-maximum suppression, map the class index to a class name, draw boxes, or emit all detections. The four box values are printed with `x1`, `y1`, `x2`, and `y2` labels, but the code does not convert coordinates or verify the model's coordinate convention; treat them as raw output values rather than guaranteed corner coordinates. The output dimensions, channel layout, class count, and tensor type are model-specific assumptions and must match the ONNX file being used.
 
 ## Engineering Tips: Function Composition
 
@@ -146,14 +163,14 @@ The terminal screenshot supplied with the earlier project run is not included as
 
 ## Build and Run
 
-This project requires CMake, a C++17 compiler, and an OpenCV development installation with camera/video I/O support.
+This project requires CMake, a C++17 compiler, OpenCV development files with camera/video I/O support, ONNX Runtime development files, and the `yolo26n.onnx` model in the repository root.
 
 ```sh
 cmake -S . -B build
 cmake --build build
-./build/vision_app
+cd build && ./vision_app
 ```
 
-When using VS Code with CMake Tools, configure the CMake project so the OpenCV include directories and libraries from `find_package(OpenCV REQUIRED)` are passed to the target.
+Run the executable from `build/` so the code's `../yolo26n.onnx` model path resolves to the model in the repository root. When using VS Code with CMake Tools, configure the CMake project so the OpenCV and ONNX Runtime include directories and libraries are available to the target.
 
 In the OpenCV window, press `s` to save the resized BGR input frame or `q` to quit. The camera must be accessible to the application; on macOS, grant camera permission to the terminal or application launching it.

@@ -146,12 +146,100 @@ void printCLAHEStats(const cv::Mat &originalL, const cv::Mat &enhancedL)
     std::cout << "Enhanced StdDev: " << enhancedStdDev[0] << std::endl;
 }
 
+cv::Mat prepareYOLOFrame(const cv::Mat &frame)
+{
+    cv::Mat resized;
+
+    cv::resize(
+        frame,
+        resized,
+        cv::Size(640, 640));
+
+    cv::cvtColor(
+        resized,
+        resized,
+        cv::COLOR_BGR2RGB);
+
+    return resized;
+}
+cv::Mat convertToYOLOFloat(const cv::Mat &frame)
+{
+    cv::Mat floatFrame;
+
+    frame.convertTo(
+        floatFrame,
+        CV_32FC3,
+        1.0 / 255.0);
+
+    return floatFrame;
+}
+std::vector<float> convertHWCtoCHW(const cv::Mat &frame)
+{
+    const int width = frame.cols;
+    const int height = frame.rows;
+    const int channels = frame.channels();
+
+    std::vector<float> chw(
+        channels * width * height);
+
+    for (int c = 0; c < channels; ++c)
+    {
+        for (int y = 0; y < height; ++y)
+        {
+            for (int x = 0; x < width; ++x)
+            {
+                chw[c * width * height +
+                    y * width +
+                    x] = frame.at<cv::Vec3f>(y, x)[c];
+            }
+        }
+    }
+
+    return chw;
+}
+
 int main()
 {
-        Ort::Env env(
+    Ort::Env env(
         ORT_LOGGING_LEVEL_WARNING,
-        "VisionPipeline"
-    );
+        "VisionPipeline");
+    Ort::SessionOptions sessionOptions;
+
+    Ort::Session session(
+        env,
+        "../yolo26n.onnx",
+        sessionOptions);
+    Ort::AllocatorWithDefaultOptions allocator;
+
+    auto inputNameAllocated =
+        session.GetInputNameAllocated(0, allocator);
+
+    auto outputNameAllocated =
+        session.GetOutputNameAllocated(0, allocator);
+
+    const char *inputName =
+        inputNameAllocated.get();
+
+    const char *outputName =
+        outputNameAllocated.get();
+
+    std::cout << "YOLO Input Name: "
+              << inputName << std::endl;
+
+    std::cout << "YOLO Output Name: "
+              << outputName << std::endl;
+    auto inputShape =
+        session.GetInputTypeInfo(0)
+            .GetTensorTypeAndShapeInfo()
+            .GetShape();
+
+    std::cout << "YOLO Input Shape: ";
+
+    for (auto dim : inputShape)
+    {
+        std::cout << dim << " ";
+    }
+
     std::cout << "OpenCV version: "
               << CV_VERSION << std::endl;
 
@@ -206,12 +294,44 @@ int main()
             std::cerr << "Error: Empty frame received." << std::endl;
             break;
         }
+        cv::Mat yoloFrame = prepareYOLOFrame(frame);
+        cv::Mat yoloFloatFrame =
+            convertToYOLOFloat(yoloFrame);
+        std::vector<float> inputTensorValues =
+            convertHWCtoCHW(yoloFloatFrame);
 
         double captureTime =
             calculateTimeDifference(captureStart, captureEnd);
         totalCaptureTime += captureTime;
         captureSamples++;
 
+        std::array<int64_t, 4> inputShape = {
+            1, 3, 640, 640};
+
+        Ort::MemoryInfo memoryInfo =
+            Ort::MemoryInfo::CreateCpu(
+                OrtArenaAllocator,
+                OrtMemTypeDefault);
+
+        Ort::Value inputTensor =
+            Ort::Value::CreateTensor<float>(
+                memoryInfo,
+                inputTensorValues.data(),
+                inputTensorValues.size(),
+                inputShape.data(),
+                inputShape.size());
+        const char *inputNames[] = {
+            inputName};
+
+        const char *outputNames[] = {
+            outputName};
+        auto outputTensors = session.Run(
+            Ort::RunOptions{nullptr},
+            inputNames,
+            &inputTensor,
+            1,
+            outputNames,
+            1);
         auto preprocessStart = std::chrono::steady_clock::now();
         cv::Mat resizedFrame;
         cv::Mat labFrame;
@@ -329,6 +449,8 @@ int main()
             printFrameInfo(normalizedFrame, "Normalized Grayscale Frame");
             printFrameInfo(hsvFrame, "HSV Frame");
             printFrameInfo(labFrame, "LAB Frame");
+            printFrameInfo(yoloFrame, "YOLO Input Frame");
+            printFrameInfo(yoloFloatFrame, "YOLO Float Frame");
             printHistogram(originalHist, "Original");
             printHistogram(enhancedHist, "Enhanced");
             printHistogramComparison(originalHist, enhancedHist);
@@ -340,7 +462,79 @@ int main()
             pixelValueAt(normalizedFrame, 0, 0, "Normalized Grayscale Frame");
             pixelValueAt(hsvFrame, 0, 0, "HSV Frame");
             pixelValueAt(labFrame, 0, 0, "LAB Frame");
+            std::cout << "YOLO Tensor Values: "
+                      << inputTensorValues.size()
+                      << std::endl;
+            std::cout << "ONNX Tensor Created" << std::endl;
+            auto outputInfo =
+                outputTensors[0].GetTensorTypeAndShapeInfo();
 
+            auto outputShape =
+                outputInfo.GetShape();
+
+            std::cout << "YOLO Output Shape: ";
+
+            for (auto dim : outputShape)
+            {
+                std::cout << dim << " ";
+            }
+            float *outputData =
+                outputTensors[0].GetTensorMutableData<float>();
+
+            // std::cout << "First 10 output values:" << std::endl;
+
+            // for (int i = 0; i < 10; ++i)
+            // {
+            //     std::cout << outputData[i] << " ";
+            // }
+            // std::cout << "\nFirst prediction:" << std::endl;
+
+            // for (int i = 0; i < 84; ++i)
+            // {
+            //     std::cout << outputData[i * 8400] << " ";
+            // }
+
+            // std::cout << std::endl;
+            float bestScore = 0.0f;
+            int bestPrediction = -1;
+            int bestClass = -1;
+
+            for (int p = 0; p < 8400; ++p)
+            {
+                for (int c = 0; c < 80; ++c)
+                {
+                    float score = outputData[(4 + c) * 8400 + p];
+
+                    if (score > bestScore)
+                    {
+                        bestScore = score;
+                        bestPrediction = p;
+                        bestClass = c;
+                    }
+                }
+            }
+
+            std::cout << "Best Prediction: "
+                      << bestPrediction << std::endl;
+
+            std::cout << "Best Class: "
+                      << bestClass << std::endl;
+
+            std::cout << "Best Score: "
+                      << bestScore << std::endl;
+            float x1 = outputData[0 * 8400 + bestPrediction];
+            float y1 = outputData[1 * 8400 + bestPrediction];
+            float x2 = outputData[2 * 8400 + bestPrediction];
+            float y2 = outputData[3 * 8400 + bestPrediction];
+
+            std::cout << "Best Box:" << std::endl;
+
+            std::cout << "x1: " << x1 << std::endl;
+            std::cout << "y1: " << y1 << std::endl;
+            std::cout << "x2: " << x2 << std::endl;
+            std::cout << "y2: " << y2 << std::endl;
+
+            std::cout << std::endl;
             firstFrame = false;
         }
 
