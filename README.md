@@ -15,8 +15,8 @@ The application is implemented in [`src/main.cpp`](src/main.cpp) and runs the fo
 7. **Grayscale CLAHE timing**: `cv::createCLAHE(2.0, cv::Size(8, 8))` creates a Contrast Limited Adaptive Histogram Equalization processor with clip limit `2.0` and an `8×8` tile grid. The first CLAHE call applies it to `grayFrame` and is timed as `Avg CLAHE`; this profiling pass is separate from the Lab enhancement used for display.
 8. **Color-space conversion**: `cv::cvtColor` also creates HSV (`cv::COLOR_BGR2HSV`) and CIE Lab (`cv::COLOR_BGR2Lab`) representations from the resized BGR frame.
 9. **Lab lightness enhancement and histogram analysis**: the Lab image is split into channels, CLAHE is applied to its L channel, and the enhanced L channel is merged with the original a/b channels before conversion back to BGR. This second CLAHE application is not included in `Avg CLAHE`. `cv::calcHist` builds 256-bin histograms for the original and enhanced L channels; `cv::meanStdDev` computes their mean and standard deviation.
-10. **YOLO inference**: the raw camera frame is resized to 640×640, converted from BGR to RGB, scaled to float values in `[0,1]`, and packed as NCHW before it is passed to the ONNX Runtime session. This inference input is separate from the 640×360 CLAHE and edge-processing pipeline described above.
-11. **Display and keyboard input**: `cv::imshow` displays the CLAHE-enhanced Lab image converted back to BGR. `cv::waitKey(1)` processes window events and checks for `s` or `q`.
+10. **YOLO inference**: the raw camera frame is resized while preserving its aspect ratio, centered on a 640×640 gray letterbox, converted from BGR to RGB, scaled to float values in `[0,1]`, and packed as NCHW before it is passed to the ONNX Runtime session. This inference input is separate from the 640×360 CLAHE and edge-processing pipeline described above.
+11. **Display and keyboard input**: `cv::imshow` displays the CLAHE-enhanced Lab image converted back to BGR. `cv::waitKey(1)` processes window events and checks for `s` or `q`. Detection-box drawing is currently commented out; the application reports detections in the console but does not show them in this live preview.
 12. **Optional save**: pressing `s` currently writes the resized BGR input to `original_frame_BGR.jpg` in the process's working directory.
 13. **Shutdown**: pressing `q` exits the loop; `cap.release()` and `cv::destroyAllWindows()` release the camera and display resources.
 
@@ -26,15 +26,26 @@ The application creates an ONNX Runtime session from `../yolo26n.onnx` relative 
 
 For every captured frame, the YOLO input is prepared independently of the CLAHE-enhanced display pipeline:
 
-1. Resize the original OpenCV BGR camera frame directly to 640×640. This stretches the image to a square; it does not preserve aspect ratio with letterboxing.
-2. Convert the resized image from BGR to RGB.
-3. Convert the 8-bit channel values to 32-bit floating point and divide by 255, giving values in `[0,1]`.
-4. Reorder the pixels from interleaved HWC layout (height, width, channels) to planar CHW layout (channels, height, width).
-5. Wrap those values in a float tensor with shape **`[1, 3, 640, 640]`** (batch, channels, height, width) and run the ONNX session.
+1. Resize the original OpenCV BGR camera frame to fit within 640×640 while preserving its aspect ratio.
+2. Place it in the center of a 640×640 canvas filled with pixel value 114, recording the scale and padding offsets for later box-coordinate mapping.
+3. Convert the letterboxed image from BGR to RGB.
+4. Convert the 8-bit channel values to 32-bit floating point and divide by 255, giving values in `[0,1]`.
+5. Reorder the pixels from interleaved HWC layout (height, width, channels) to planar CHW layout (channels, height, width).
+6. Wrap those values in a float tensor with shape **`[1, 3, 640, 640]`** (batch, channels, height, width) and run the ONNX session.
 
-The code assumes the model's output is a float tensor shaped **`[1, 84, 8400]`**: 84 channels for each of 8,400 candidate predictions. It treats channels 0–3 as four box values and channels 4–83 as 80 class scores. For the first captured frame only, it scans all 8,400 candidates and their 80 class scores, then reports the candidate and class with the highest score, along with that score and the candidate's four raw box values.
+The code assumes the model's output is a float tensor shaped **`[1, 84, 8400]`**: 84 channels for each of 8,400 candidate predictions. It treats channels 0–3 as box center `x`, center `y`, width, and height, and channels 4–83 as 80 class scores. For the first captured frame only, it selects each candidate's highest class score, filters candidates below a confidence threshold of `0.50`, and prints the remaining class IDs, scores, and raw box values.
 
-This is a minimal output inspection, not a complete detector post-processing pipeline. It does not apply a confidence threshold or non-maximum suppression, map the class index to a class name, draw boxes, or emit all detections. The four box values are printed with `x1`, `y1`, `x2`, and `y2` labels, but the code does not convert coordinates or verify the model's coordinate convention; treat them as raw output values rather than guaranteed corner coordinates. The output dimensions, channel layout, class count, and tensor type are model-specific assumptions and must match the ONNX file being used.
+The code includes helpers to remove the letterbox padding, scale and clip box coordinates back to the original camera frame, and draw labeled boxes. Their use in the rendering path is currently commented out, as is the separate YOLO detection window; consequently detections are currently printed to the console, while the live window continues to show the CLAHE-enhanced frame. Non-maximum suppression (NMS) is not applied, so overlapping candidate boxes may remain in the printed results. The output dimensions, channel layout, class count, and tensor type are model-specific assumptions and must match the ONNX file being used.
+
+## YOLO Detection Results
+
+The following screenshots are saved results from the detection visualization. They show a green bounding box around a detected subject; the close-up includes the displayed class index `0` and confidence `0.895924`.
+
+| Detection visualization | Full-window capture |
+| --- | --- |
+| <img src="assets/results/yolo_detection_closeup.png" alt="YOLO detection close-up showing a green bounding box, class 0, and confidence 0.895924" width="320"> | <img src="assets/results/yolo_detection_full_window.png" alt="Full-window YOLO detection result with a green bounding box" width="320"> |
+
+These are recorded result images, not a claim that the current checked-in live preview draws detections: the box drawing and YOLO window display calls in `src/main.cpp` are commented out. Enable those calls and map the letterboxed model coordinates to the original frame to reproduce an annotated live view.
 
 ## Engineering Tips: Function Composition
 

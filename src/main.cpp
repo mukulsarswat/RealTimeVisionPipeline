@@ -146,21 +146,140 @@ void printCLAHEStats(const cv::Mat &originalL, const cv::Mat &enhancedL)
     std::cout << "Enhanced StdDev: " << enhancedStdDev[0] << std::endl;
 }
 
-cv::Mat prepareYOLOFrame(const cv::Mat &frame)
+// cv::Mat prepareYOLOFrame(const cv::Mat &frame)
+// {
+//     cv::Mat resized;
+
+//     cv::resize(
+//         frame,
+//         resized,
+//         cv::Size(640, 640));
+
+//     cv::cvtColor(
+//         resized,
+//         resized,
+//         cv::COLOR_BGR2RGB);
+
+//     return resized;
+// }
+// cv::Mat prepareYOLOFrame(const cv::Mat& frame)
+// {
+//     const int targetWidth = 640;
+//     const int targetHeight = 640;
+
+//     double scale = std::min(
+//         static_cast<double>(targetWidth) / frame.cols,
+//         static_cast<double>(targetHeight) / frame.rows
+//     );
+
+//     int newWidth =
+//         static_cast<int>(frame.cols * scale);
+
+//     int newHeight =
+//         static_cast<int>(frame.rows * scale);
+
+//     cv::Mat resized;
+
+//     cv::resize(
+//         frame,
+//         resized,
+//         cv::Size(newWidth, newHeight)
+//     );
+
+//     cv::Mat letterboxed(
+//         targetHeight,
+//         targetWidth,
+//         resized.type(),
+//         cv::Scalar(114, 114, 114)
+//     );
+
+//     int xOffset =
+//         (targetWidth - newWidth) / 2;
+
+//     int yOffset =
+//         (targetHeight - newHeight) / 2;
+
+//     resized.copyTo(
+//         letterboxed(
+//             cv::Rect(
+//                 xOffset,
+//                 yOffset,
+//                 newWidth,
+//                 newHeight
+//             )
+//         )
+//     );
+
+//     cv::cvtColor(
+//         letterboxed,
+//         letterboxed,
+//         cv::COLOR_BGR2RGB
+//     );
+
+//     return letterboxed;
+// }
+struct LetterboxResult
 {
+    cv::Mat image;
+    double scale;
+    int xOffset;
+    int yOffset;
+};
+LetterboxResult prepareYOLOFrame(const cv::Mat &frame)
+{
+    const int targetWidth = 640;
+    const int targetHeight = 640;
+
+    double scale = std::min(
+        static_cast<double>(targetWidth) / frame.cols,
+        static_cast<double>(targetHeight) / frame.rows);
+
+    int newWidth =
+        static_cast<int>(frame.cols * scale);
+
+    int newHeight =
+        static_cast<int>(frame.rows * scale);
+
     cv::Mat resized;
 
     cv::resize(
         frame,
         resized,
-        cv::Size(640, 640));
+        cv::Size(newWidth, newHeight));
+
+    cv::Mat letterboxed(
+        targetHeight,
+        targetWidth,
+        resized.type(),
+        cv::Scalar(114, 114, 114));
+
+    int xOffset =
+        (targetWidth - newWidth) / 2;
+
+    int yOffset =
+        (targetHeight - newHeight) / 2;
+
+    resized.copyTo(
+        letterboxed(
+            cv::Rect(
+                xOffset,
+                yOffset,
+                newWidth,
+                newHeight)));
 
     cv::cvtColor(
-        resized,
-        resized,
+        letterboxed,
+        letterboxed,
         cv::COLOR_BGR2RGB);
 
-    return resized;
+    LetterboxResult result;
+
+    result.image = letterboxed;
+    result.scale = scale;
+    result.xOffset = xOffset;
+    result.yOffset = yOffset;
+
+    return result;
 }
 cv::Mat convertToYOLOFloat(const cv::Mat &frame)
 {
@@ -197,9 +316,215 @@ std::vector<float> convertHWCtoCHW(const cv::Mat &frame)
 
     return chw;
 }
+struct Detection
+{
+    float x;
+    float y;
+    float width;
+    float height;
+    float confidence;
+    int classId;
+};
+Detection decodeBestDetection(
+    const float *outputData,
+    int predictionCount,
+    int classCount)
+{
+    float bestScore = 0.0f;
+    int bestPrediction = -1;
+    int bestClass = -1;
+
+    for (int p = 0; p < predictionCount; ++p)
+    {
+        for (int c = 0; c < classCount; ++c)
+        {
+            float score =
+                outputData[(4 + c) * predictionCount + p];
+
+            if (score > bestScore)
+            {
+                bestScore = score;
+                bestPrediction = p;
+                bestClass = c;
+            }
+        }
+    }
+
+    Detection detection;
+
+    detection.x =
+        outputData[0 * predictionCount + bestPrediction];
+
+    detection.y =
+        outputData[1 * predictionCount + bestPrediction];
+
+    detection.width =
+        outputData[2 * predictionCount + bestPrediction];
+
+    detection.height =
+        outputData[3 * predictionCount + bestPrediction];
+
+    detection.confidence = bestScore;
+    detection.classId = bestClass;
+
+    return detection;
+}
+std::vector<Detection> decodeDetections(
+    const float *outputData,
+    int predictionCount,
+    int classCount,
+    float confidenceThreshold)
+{
+    std::vector<Detection> detections;
+
+    for (int p = 0; p < predictionCount; ++p)
+    {
+        float bestScore = 0.0f;
+        int bestClass = -1;
+
+        for (int c = 0; c < classCount; ++c)
+        {
+            float score =
+                outputData[(4 + c) * predictionCount + p];
+
+            if (score > bestScore)
+            {
+                bestScore = score;
+                bestClass = c;
+            }
+        }
+
+        if (bestScore < confidenceThreshold)
+        {
+            continue;
+        }
+
+        Detection detection;
+
+        detection.x =
+            outputData[0 * predictionCount + p];
+
+        detection.y =
+            outputData[1 * predictionCount + p];
+
+        detection.width =
+            outputData[2 * predictionCount + p];
+
+        detection.height =
+            outputData[3 * predictionCount + p];
+
+        detection.confidence = bestScore;
+        detection.classId = bestClass;
+
+        detections.push_back(detection);
+    }
+
+    return detections;
+}
+cv::Rect detectionToRect(const Detection &detection)
+{
+    int left =
+        static_cast<int>(
+            detection.x - detection.width / 2.0f);
+
+    int top =
+        static_cast<int>(
+            detection.y - detection.height / 2.0f);
+
+    int width =
+        static_cast<int>(detection.width);
+
+    int height =
+        static_cast<int>(detection.height);
+
+    return cv::Rect(left, top, width, height);
+}
+void drawDetection(
+    cv::Mat &frame,
+    const Detection &detection,
+    const cv::Rect &box)
+{
+    cv::rectangle(
+        frame,
+        box,
+        cv::Scalar(0, 255, 0),
+        2);
+
+    std::string label =
+        "Class " +
+        std::to_string(detection.classId) +
+        " " +
+        std::to_string(detection.confidence);
+
+    cv::putText(
+        frame,
+        label,
+        cv::Point(box.x, box.y - 10),
+        cv::FONT_HERSHEY_SIMPLEX,
+        0.6,
+        cv::Scalar(0, 255, 0),
+        2);
+}
+cv::Rect mapDetectionToOriginalFrame(
+    const Detection &detection,
+    const LetterboxResult &letterbox,
+    const cv::Size &originalSize)
+{
+    float left =
+        detection.x -
+        detection.width / 2.0f;
+
+    float top =
+        detection.y -
+        detection.height / 2.0f;
+
+    float right =
+        detection.x +
+        detection.width / 2.0f;
+
+    float bottom =
+        detection.y +
+        detection.height / 2.0f;
+
+    left =
+        (left - letterbox.xOffset) /
+        letterbox.scale;
+
+    top =
+        (top - letterbox.yOffset) /
+        letterbox.scale;
+
+    right =
+        (right - letterbox.xOffset) /
+        letterbox.scale;
+
+    bottom =
+        (bottom - letterbox.yOffset) /
+        letterbox.scale;
+
+    left = std::max(0.0f, left);
+    top = std::max(0.0f, top);
+
+    right =
+        std::min(
+            static_cast<float>(originalSize.width),
+            right);
+
+    bottom =
+        std::min(
+            static_cast<float>(originalSize.height),
+            bottom);
+
+    return cv::Rect(
+        static_cast<int>(left),
+        static_cast<int>(top),
+        static_cast<int>(right - left),
+        static_cast<int>(bottom - top));
+}
 
 int main()
 {
+
     Ort::Env env(
         ORT_LOGGING_LEVEL_WARNING,
         "VisionPipeline");
@@ -294,7 +619,12 @@ int main()
             std::cerr << "Error: Empty frame received." << std::endl;
             break;
         }
-        cv::Mat yoloFrame = prepareYOLOFrame(frame);
+        // cv::Mat yoloFrame = prepareYOLOFrame(frame);
+        LetterboxResult letterbox =
+            prepareYOLOFrame(frame);
+
+        cv::Mat yoloFrame =
+            letterbox.image;
         cv::Mat yoloFloatFrame =
             convertToYOLOFloat(yoloFrame);
         std::vector<float> inputTensorValues =
@@ -481,6 +811,34 @@ int main()
             float *outputData =
                 outputTensors[0].GetTensorMutableData<float>();
 
+            std::vector<Detection> detections =
+                decodeDetections(
+                    outputData,
+                    8400,
+                    80,
+                    0.50f);
+
+            std::cout << "Detections above threshold: "
+                        << detections.size()
+                        << std::endl;
+
+            for (const Detection& detection : detections)
+            {
+                std::cout << "Class: "
+                        << detection.classId
+                        << " | Confidence: "
+                        << detection.confidence
+                        << " | X: "
+                        << detection.x
+                        << " | Y: "
+                        << detection.y
+                        << " | W: "
+                        << detection.width
+                        << " | H: "
+                        << detection.height
+                        << std::endl;
+            }
+
             // std::cout << "First 10 output values:" << std::endl;
 
             // for (int i = 0; i < 10; ++i)
@@ -495,44 +853,61 @@ int main()
             // }
 
             // std::cout << std::endl;
-            float bestScore = 0.0f;
-            int bestPrediction = -1;
-            int bestClass = -1;
+            // Detection bestDetection =
+            //     decodeBestDetection(
+            //         outputData,
+            //         8400,
+            //         80);
+            // cv::Rect originalBox =
+            //     mapDetectionToOriginalFrame(
+            //         bestDetection,
+            //         letterbox,
+            //         frame.size());
 
-            for (int p = 0; p < 8400; ++p)
-            {
-                for (int c = 0; c < 80; ++c)
-                {
-                    float score = outputData[(4 + c) * 8400 + p];
+            // std::cout << "Best Detection:" << std::endl;
 
-                    if (score > bestScore)
-                    {
-                        bestScore = score;
-                        bestPrediction = p;
-                        bestClass = c;
-                    }
-                }
-            }
+            // std::cout << "X: "
+            //           << bestDetection.x << std::endl;
 
-            std::cout << "Best Prediction: "
-                      << bestPrediction << std::endl;
+            // std::cout << "Y: "
+            //           << bestDetection.y << std::endl;
 
-            std::cout << "Best Class: "
-                      << bestClass << std::endl;
+            // std::cout << "Width: "
+            //           << bestDetection.width << std::endl;
 
-            std::cout << "Best Score: "
-                      << bestScore << std::endl;
-            float x1 = outputData[0 * 8400 + bestPrediction];
-            float y1 = outputData[1 * 8400 + bestPrediction];
-            float x2 = outputData[2 * 8400 + bestPrediction];
-            float y2 = outputData[3 * 8400 + bestPrediction];
+            // std::cout << "Height: "
+            //           << bestDetection.height << std::endl;
 
-            std::cout << "Best Box:" << std::endl;
+            // std::cout << "Confidence: "
+            //           << bestDetection.confidence << std::endl;
 
-            std::cout << "x1: " << x1 << std::endl;
-            std::cout << "y1: " << y1 << std::endl;
-            std::cout << "x2: " << x2 << std::endl;
-            std::cout << "y2: " << y2 << std::endl;
+            // std::cout << "Class ID: "
+            //           << bestDetection.classId << std::endl;
+
+            // cv::Rect bestBox =
+            //     detectionToRect(bestDetection);
+
+            // std::cout << "Box:" << std::endl;
+
+            // std::cout << "Left: "
+            //           << bestBox.x << std::endl;
+
+            // std::cout << "Top: "
+            //           << bestBox.y << std::endl;
+
+            // std::cout << "Width: "
+            //           << bestBox.width << std::endl;
+
+            // std::cout << "Height: "
+            //           << bestBox.height << std::endl;
+            // drawDetection(
+            //     frame,
+            //     bestDetection,
+            //     originalBox);
+
+            // cv::imshow(
+            //     "YOLO Detection",
+            //     frame);
 
             std::cout << std::endl;
             firstFrame = false;
@@ -549,7 +924,7 @@ int main()
                 currentTime - startTime)
                 .count();
 
-        if (elapsedSeconds >= 1.0)
+        if (elapsedSeconds >= 10.0)
         {
             fps = static_cast<double>(frameCount) / elapsedSeconds;
             averageCaptureTime = captureSamples > 0 ? totalCaptureTime / captureSamples : 0.0;
