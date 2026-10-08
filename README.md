@@ -1,30 +1,23 @@
 # Real-Time Vision Pipeline
 
-A small C++17 application using OpenCV and ONNX Runtime. It reads frames from the default camera, runs YOLO inference, explores BGR/HSV/Lab color spaces, measures Lab-channel histograms, detects edges with Canny, enhances local contrast with CLAHE, and reports timing and frame-rate measurements.
+A small C++17 application using OpenCV and ONNX Runtime. It reads frames from the default camera, runs YOLO inference, draws detections, and reports timing and frame-rate measurements. Earlier grayscale, Canny, CLAHE, color-space, histogram, and profiling examples remain in the source and assets, but their per-frame processing path is currently commented out.
 
 ## Pipeline
 
-The application is implemented in [`src/main.cpp`](src/main.cpp) and runs the following stages for each camera frame:
+The application is implemented in [`src/main.cpp`](src/main.cpp) and runs these active stages for each camera frame:
 
-1. **Camera acquisition**: `cv::VideoCapture cap(0)` opens camera device 0. `cap >> frame` retrieves a frame. `Avg Capture` measures this camera read only.
-2. **Original-frame inspection**: on the first valid frame, the program prints its width, height, channel count, pixel count, OpenCV matrix type, and the BGR values at pixel `[0,0]`.
-3. **Preprocess**: `preprocessFrame()` composes `resizeFrame()` with `enhanceWithCLAHE()`. It resizes the camera image once to 640×360, converts it to Lab, enhances the L channel, and returns the enhanced BGR image along with intermediate matrices used by diagnostics.
-4. **Grayscale and normalization**: `cv::cvtColor(resizedFrame, grayFrame, cv::COLOR_BGR2GRAY)` converts BGR to one-channel grayscale. `grayFrame.convertTo(normalizedFrame, CV_32F, 1.0 / 255.0)` creates a floating-point grayscale image scaled to `[0,1]` for inspection. In the current code, the blur and Canny stages use `grayFrame`, not `normalizedFrame`.
-5. **Gaussian smoothing**: `cv::GaussianBlur(grayFrame, blurredFrame, cv::Size(5, 5), 0)` applies a 5×5 Gaussian kernel before edge detection. The zero sigma lets OpenCV derive the Gaussian standard deviation from the kernel size.
-6. **Canny edge detection**: `cv::Canny(blurredFrame, edges, 50, 150)` produces a single-channel binary edge map for comparison and downstream use.
-7. **Grayscale CLAHE timing**: `cv::createCLAHE(2.0, cv::Size(8, 8))` creates a Contrast Limited Adaptive Histogram Equalization processor with clip limit `2.0` and an `8×8` tile grid. The first CLAHE call applies it to `grayFrame` and is timed as `Avg CLAHE`; this profiling pass is separate from the Lab enhancement used for display.
-8. **Color-space conversion**: `cv::cvtColor` also creates HSV (`cv::COLOR_BGR2HSV`) and CIE Lab (`cv::COLOR_BGR2Lab`) representations from the resized BGR frame.
-9. **Lab lightness enhancement and histogram analysis**: the Lab image is split into channels, CLAHE is applied to its L channel, and the enhanced L channel is merged with the original a/b channels before conversion back to BGR. This second CLAHE application is not included in `Avg CLAHE`. `cv::calcHist` builds 256-bin histograms for the original and enhanced L channels; `cv::meanStdDev` computes their mean and standard deviation.
-10. **YOLO inference**: the raw camera frame is resized while preserving its aspect ratio, centered on a 640×640 gray letterbox, converted from BGR to RGB, scaled to float values in `[0,1]`, and packed as NCHW before it is passed to the ONNX Runtime session. This inference input is separate from the 640×360 CLAHE and edge-processing pipeline described above.
-11. **Display and keyboard input**: `cv::imshow` displays the CLAHE-enhanced Lab image converted back to BGR. `cv::waitKey(1)` processes window events and checks for `s` or `q`. Detection-box drawing is currently commented out; the application reports detections in the console but does not show them in this live preview.
-12. **Optional save**: pressing `s` currently writes the resized BGR input to `original_frame_BGR.jpg` in the process's working directory.
-13. **Shutdown**: pressing `q` exits the loop; `cap.release()` and `cv::destroyAllWindows()` release the camera and display resources.
+1. **Camera acquisition**: opens camera device 0, requests 640×480 using `CAP_PROP_FRAME_WIDTH` and `CAP_PROP_FRAME_HEIGHT`, and prints the camera-reported resolution and FPS. The requested mode may not be supported; the reported properties are the values returned by the capture backend.
+2. **YOLO input preparation**: preserves the captured frame's aspect ratio while resizing it to fit 640×640, centers it on a value-114 letterbox, converts BGR to RGB, scales pixels to float `[0,1]`, and packs the image in NCHW order.
+3. **Inference and detections**: ONNX Runtime evaluates the `[1, 3, 640, 640]` input. Candidate detections are confidence-filtered and passed through NMS; remaining boxes are mapped back to the captured-frame coordinates and drawn on the live image.
+4. **Display and keyboard input**: displays the annotated frame in the `YOLO Detection` window. Press `q` to exit. The current loop calls `waitKey(1)` during display and again when checking the key.
+
+The former grayscale, Canny, CLAHE, HSV/Lab conversion, histogram, and diagnostic-printing pipeline is retained in the source but commented out in the active loop. The historical images and descriptions below document those earlier experiments.
 
 ## YOLO and ONNX Inference
 
 The application creates an ONNX Runtime session from `../yolo26n.onnx` relative to the process's working directory. The model file must be present at that path. The session's first input and output names are queried from the model rather than hard-coded.
 
-For every captured frame, the YOLO input is prepared independently of the CLAHE-enhanced display pipeline:
+For every captured frame, the YOLO input is prepared as follows:
 
 1. Resize the original OpenCV BGR camera frame to fit within 640×640 while preserving its aspect ratio.
 2. Place it in the center of a 640×640 canvas filled with pixel value 114, recording the scale and padding offsets for later box-coordinate mapping.
@@ -33,9 +26,9 @@ For every captured frame, the YOLO input is prepared independently of the CLAHE-
 5. Reorder the pixels from interleaved HWC layout (height, width, channels) to planar CHW layout (channels, height, width).
 6. Wrap those values in a float tensor with shape **`[1, 3, 640, 640]`** (batch, channels, height, width) and run the ONNX session.
 
-The code assumes the model's output is a float tensor shaped **`[1, 84, 8400]`**: 84 channels for each of 8,400 candidate predictions. It treats channels 0–3 as box center `x`, center `y`, width, and height, and channels 4–83 as 80 class scores. For the first captured frame only, it selects each candidate's highest class score, filters candidates below a confidence threshold of `0.50`, and prints the remaining class IDs, scores, and raw box values.
+The code assumes the model's output is a float tensor shaped **`[1, 84, 8400]`**: 84 channels for each of 8,400 candidate predictions. It treats channels 0–3 as box center `x`, center `y`, width, and height, and channels 4–83 as 80 class scores. For each captured frame, it selects each candidate's highest class score, filters candidates below a confidence threshold of `0.50`, applies NMS with an IoU threshold of `0.45`, and draws the remaining detections.
 
-The code includes helpers to remove the letterbox padding, scale and clip box coordinates back to the original camera frame, and draw labeled boxes. Their use in the rendering path is currently commented out, as is the separate YOLO detection window; consequently detections are currently printed to the console, while the live window continues to show the CLAHE-enhanced frame. Non-maximum suppression (NMS) is not applied, so overlapping candidate boxes may remain in the printed results. The output dimensions, channel layout, class count, and tensor type are model-specific assumptions and must match the ONNX file being used.
+The code removes letterbox padding, maps and clips box coordinates to the captured frame, applies NMS, and draws labeled boxes in the live `YOLO Detection` window. The model output dimensions, channel layout, class count, and tensor type are model-specific assumptions and must match the ONNX file being used.
 
 ## YOLO Detection Results
 
@@ -45,11 +38,11 @@ The following screenshots are saved results from the detection visualization. Th
 | --- | --- |
 | <img src="assets/results/yolo_detection_closeup.png" alt="YOLO detection close-up showing a green bounding box, class 0, and confidence 0.895924" width="320"> | <img src="assets/results/yolo_detection_full_window.png" alt="Full-window YOLO detection result with a green bounding box" width="320"> |
 
-These are recorded result images, not a claim that the current checked-in live preview draws detections: the box drawing and YOLO window display calls in `src/main.cpp` are commented out. Enable those calls and map the letterboxed model coordinates to the original frame to reproduce an annotated live view.
+These screenshots are recorded examples of the annotated detection view.
 
-## Engineering Tips: Function Composition
+## Earlier Pipeline: Function Composition
 
-The pipeline keeps small, focused functions outside `main()` and composes them into a higher-level operation:
+The earlier image-processing pipeline kept small, focused functions outside `main()` and composed them into a higher-level operation:
 
 ```text
 preprocessFrame(frame)
@@ -57,23 +50,23 @@ preprocessFrame(frame)
   └── enhanceWithCLAHE(resizedFrame)
 ```
 
-This keeps each image-processing step understandable while giving `main()` a clear description of the per-frame workflow. Reuse the resized frame for later color-space conversions instead of resizing the original frame again; duplicate image work adds latency to every frame. Measure the composed call once when reporting preprocessing time so the metric reflects the work actually performed. For incremental learning, introduce one small function at a time and preserve the existing standalone-function structure; a class is only useful when shared state or object ownership makes it clearer.
+This kept each image-processing step understandable while giving `main()` a clear description of the per-frame workflow. Reusing a resized frame avoids duplicate image work. These helper functions remain in the source, but this preprocessing composition is not part of the active YOLO loop.
 
 ## OpenCV API Used
 
 - `cv::VideoCapture` opens a camera; `isOpened()` tests whether the device was opened; the stream extraction operator reads a frame; `release()` closes the capture device.
 - `cv::Mat` stores the original, resized, and grayscale images.
-- `cv::resize` resamples an image to a specified size. This application requests 640×360.
+- `cv::resize` resamples an image to a specified size. The active camera request is 640×480; YOLO preprocessing then scales and letterboxes the captured image to 640×640.
 - `cv::Size` represents the target width and height passed to `cv::resize`.
-- `cv::cvtColor` applies a color-space conversion. `cv::COLOR_BGR2GRAY` specifies conversion from OpenCV's BGR channel order to grayscale.
-- `cv::Mat::convertTo` converts image depth and optionally scales pixel values; `CV_32F` selects 32-bit floating point, and the scale `1.0 / 255.0` normalizes 8-bit grayscale values to `[0,1]`.
-- `cv::GaussianBlur` reduces high-frequency noise before edge detection; `cv::Size(5, 5)` sets the kernel dimensions and `sigmaX=0` asks OpenCV to derive sigma from the kernel.
-- `cv::Canny` detects edges using gradient magnitude, non-maximum suppression, and two-threshold hysteresis. The live pipeline calls it with thresholds `50` and `150`.
-- `cv::createCLAHE` creates a CLAHE processor. The current code uses clip limit `2.0` and an `8×8` tile grid; `apply` produces the contrast-enhanced output. The live display comes from the separate CLAHE application on Lab L, converted back to BGR.
+- `cv::cvtColor` applies a color-space conversion. The active YOLO preprocessing uses `cv::COLOR_BGR2RGB`; the earlier image-processing experiment also used `cv::COLOR_BGR2GRAY`.
+- `cv::Mat::convertTo` converts image depth and optionally scales pixel values; YOLO preprocessing selects 32-bit float and scales image values by `1.0 / 255.0`.
+- `cv::GaussianBlur` reduces high-frequency noise before edge detection in the earlier pipeline; `cv::Size(5, 5)` sets the kernel dimensions and `sigmaX=0` asks OpenCV to derive the Gaussian sigma.
+- `cv::Canny` detects edges using gradient magnitude, non-maximum suppression, and two-threshold hysteresis. The earlier pipeline used thresholds `50` and `150`; this stage is not active in the current YOLO loop.
+- `cv::createCLAHE` creates a CLAHE processor. The retained earlier image-processing experiment uses clip limit `2.0` and an `8×8` tile grid; that pipeline is currently commented out of the live loop.
 - `cv::COLOR_BGR2HSV`, `cv::COLOR_BGR2Lab`, and `cv::COLOR_Lab2BGR` convert between BGR, HSV, and Lab color spaces. Lab separates lightness (L) from chromatic a/b components, allowing contrast enhancement on L while preserving the original color channels.
-- `cv::split` separates a multi-channel matrix into individual channel matrices; `cv::merge` combines channel matrices back into a multi-channel image.
-- `cv::calcHist` computes a histogram. In this project it receives one 8-bit L channel, one channel index, no mask, an empty output accumulator, 256 bins, and a value range `[0, 256)`. Each bin counts pixels for an L intensity.
-- `cv::meanStdDev` calculates per-channel mean and standard deviation. Here it measures the original and CLAHE-enhanced L-channel distribution; a larger standard deviation generally indicates a wider spread of lightness values, not necessarily better image quality.
+- `cv::split` separates a multi-channel matrix into individual channel matrices. The active YOLO input conversion uses it to create RGB channel planes before copying them into contiguous CHW tensor storage; `cv::merge` combines channel matrices back into an image in the earlier color-processing pipeline.
+- `cv::calcHist` computes a histogram. The earlier image-processing experiment used it for one 8-bit L channel, 256 bins, and a value range `[0, 256)`.
+- `cv::meanStdDev` calculates per-channel mean and standard deviation. The earlier experiment used it to compare original and CLAHE-enhanced L-channel distributions; a larger standard deviation generally indicates a wider spread of lightness values, not necessarily better image quality.
 - `cv::Mat::rows`, `cols`, `channels()`, `total()`, and `type()` expose frame metadata; `at<cv::Vec3b>` accesses a BGR pixel and `at<unsigned char>` accesses one grayscale pixel.
 - `cv::imshow` displays a frame, `cv::waitKey` handles GUI events and keyboard input, and `cv::destroyAllWindows` closes OpenCV windows.
 - `cv::imwrite` encodes and saves the selected frame as an image file.
@@ -81,25 +74,40 @@ This keeps each image-processing step understandable while giving `main()` a cle
 
 ## Profiling and Bottleneck Notes
 
-The code uses `std::chrono::steady_clock` and `std::chrono::duration<double, std::milli>` to measure elapsed wall-clock time. A monotonic clock is appropriate for durations because wall-clock adjustments do not affect it.
+The active YOLO loop uses `std::chrono` timers in `main()` to inspect time spent at each major stage. It prints per-frame measurements and reports FPS every 30 processed frames. FPS is computed from the total processed-frame count and elapsed time since the loop started, so it is a cumulative rate sampled every 30 frames, not a rolling 30-frame average.
 
-- **Capture time** (`Avg Capture`): the timer surrounds only `cap >> frame` and measures camera read/wait time.
-- **Grayscale time** (`Avg Grayscale`): the timer includes both `cv::cvtColor` and conversion/normalization with `convertTo`.
-- **Blur time** (`Avg Blur`): the timer measures `cv::GaussianBlur` using the 5×5 kernel.
-- **Canny time** (`Avg Canny`): the timer measures only `cv::Canny` on the blurred grayscale image.
-- **CLAHE time** (`Avg CLAHE`): the timer measures the first `clahe->apply` on grayscale. CLAHE object creation and parameter setup occur outside this timer; the later application on Lab L used for display and histogram analysis is not timed.
-- **Unmeasured work**: resize, frame inspection, display, keyboard handling, and scheduling are not included in these individual stage timers. The FPS is the observed loop rate, not the reciprocal of the sum of the listed averages.
-- **FPS**: `frameCount / elapsedSeconds` is calculated over roughly one-second reporting windows. This is the observed loop rate, including capture, processing, display/event handling, and scheduling; it is not a pure image-processing throughput measurement.
+| Measurement printed by the application | Work included |
+| --- | --- |
+| `Capture Time` | The `cap.read(frame)` camera read/wait. |
+| `Letterbox` | Aspect-ratio-preserving resize and placement on the 640×640 padded canvas. |
+| `Float conversion` | Conversion to `CV_32FC3` and normalization by `1/255`. |
+| `HWC -> CHW` | `cv::split` of RGB channels and `memcpy` into the planar model-input tensor. |
+| `YOLO Preprocess Time` | Letterbox, float conversion, and HWC→CHW together. |
+| `Current Inference` / `Inference Time` | The ONNX Runtime `session.Run()` call. |
+| `Decode Time` | Candidate class-score scan and confidence-threshold filtering. |
+| `NMS` | Non-maximum suppression over the filtered detections. |
+| `Drawing` | Mapping boxes to the camera-frame coordinates and drawing labels/rectangles. |
+| `Display` | `imshow` and one `waitKey(1)` call. |
+| `Total Frame Time` | Time from the beginning of the loop iteration through processing, display, console output, and the second `waitKey(1)` call. |
+| `FPS` | Processed frames divided by elapsed wall time since `fpsStart`; printed every 30 processed frames. |
 
-In the recorded run below, camera read is the largest of the explicitly timed stages. Canny, CLAHE, grayscale/normalization, and blur each take less than 1 ms. Resize and display are not individually timed, so this snapshot does not establish their relative cost. Measurements vary with the camera, resolution, machine, and runtime conditions.
+### Optimizations tried and observed impact
 
-The original 1280×720 frame contains 921,600 pixels. Resizing to 640×360 reduces this to 230,400 pixels, one quarter as many. The grayscale output remains 640×360 but uses one channel instead of three, reducing image data per pixel from three channel values to one. These steps lower the amount of image data subsequent stages need to handle.
+- **Profile before optimizing:** separate timers were added around camera capture, letterboxing, float conversion, tensor layout conversion, inference, decoding, NMS, drawing, display, and the full frame. This makes it possible to compare stages instead of inferring bottlenecks from FPS alone. The instrumentation currently prints several timing lines every frame; console I/O is part of total frame time and can itself reduce throughput.
+- **HWC-to-CHW conversion:** the earlier per-pixel conversion was replaced with OpenCV `cv::split()` followed by `std::memcpy()` of each contiguous channel plane. In the local comparison this reduced the HWC→CHW conversion time by about **50%**. That is a stage-level observation, not a 50% increase in whole-pipeline FPS; inference and other stages are unchanged.
+- **ONNX Runtime graph optimization:** the session sets `GraphOptimizationLevel::ORT_ENABLE_ALL` before model creation. This enables ONNX Runtime's available graph optimizations, but the FPS impact depends on the model, execution provider, and machine.
+- **Camera capture mode:** the application requests 640×480 and prints the capture backend's reported resolution and FPS. Compared with the earlier 1280×720 mode, 640×480 contains one third as many camera pixels, reducing camera-frame transfer and work performed before model input preparation. A camera backend may ignore the requested size, so check the reported resolution.
+- **Letterboxing and model input size:** the captured image is still letterboxed to a fixed 640×640 tensor. For a 640×480 source, the resized image occupies 640×480 with padding above and below. Thus reducing the camera capture resolution does **not** reduce the ONNX model's 640×640 input shape or its per-inference tensor dimensions.
 
-## Histogram Analysis
+Despite these changes, the measured end-to-end FPS did not improve significantly in the observed run. Faster tensor packing alone may have little effect if it is a small fraction of total frame time; the fixed-size model inference, camera read/wait, display, and per-frame console output remain in the pipeline. Use repeated timing runs under the same camera/backend and machine conditions to determine which stage dominates. No universal timing numbers are recorded here because they vary by device and runtime. Camera-reported FPS is also backend metadata and may be unavailable or zero; compare it with the application's measured FPS.
 
-The application analyzes the lightness channel of the Lab frame before and after CLAHE. `cv::calcHist` creates a 256-bin frequency histogram across the 8-bit L values from 0 through 255. The program then groups adjacent bins into five bands (0–49, 50–99, 100–149, 150–199, and 200–255) and sums the pixel counts in each band for both images. These totals show how lightness values are distributed across dark to bright ranges; they are counts, not percentages, because the histogram is not normalized.
+The older grayscale/Canny/CLAHE FPS samples below belong to the earlier image-processing pipeline and are not measurements of the current YOLO loop.
 
-`cv::meanStdDev` provides complementary summary statistics. The mean reports average L-channel intensity, while standard deviation describes the spread around that mean. CLAHE is local and contrast-limited, so a histogram may redistribute counts and increase local detail without necessarily changing the global mean dramatically. Histogram counts and standard deviation help quantify the transformation, but should be interpreted alongside the image because they do not measure perceptual quality by themselves.
+## Historical Histogram Analysis
+
+The earlier image-processing pipeline analyzed the lightness channel of the Lab frame before and after CLAHE. `cv::calcHist` created a 256-bin frequency histogram across the 8-bit L values from 0 through 255. The program then grouped adjacent bins into five bands (0–49, 50–99, 100–149, 150–199, and 200–255) and summed the pixel counts in each band for both images. These totals show how lightness values are distributed across dark to bright ranges; they are counts, not percentages, because the histogram is not normalized.
+
+`cv::meanStdDev` provided complementary summary statistics. The mean reports average L-channel intensity, while standard deviation describes the spread around that mean. CLAHE is local and contrast-limited, so a histogram may redistribute counts and increase local detail without necessarily changing the global mean dramatically. Histogram counts and standard deviation help quantify the transformation, but should be interpreted alongside the image because they do not measure perceptual quality by themselves.
 
 ## Color-Space Captures
 
@@ -108,36 +116,36 @@ The application analyzes the lightness channel of the Lab frame before and after
 | <img src="assets/frames/original_frame_BGR.jpg" alt="Resized input image in BGR color space" width="180"> | <img src="assets/frames/enhanced_frame_BGR.jpg" alt="CLAHE-enhanced result converted back to BGR" width="180"> | <img src="assets/frames/enhanced_frame_HSV.jpg" alt="HSV channel values rendered as an image" width="180"> | <img src="assets/frames/enhanced_frame_LAB.jpg" alt="Lab channel values rendered as an image" width="180"> |
 | The resized camera frame before the Lab lightness enhancement. | A brighter, higher-local-contrast result reconstructed using enhanced L and original a/b channels. | HSV stores hue, saturation, and value. Displaying those raw channels as BGR produces false colors; this is a data visualization, not a natural-color HSV conversion. | Lab stores lightness and two chromatic channels. Displaying raw Lab channel values as BGR also produces false colors; the image is included to show the encoded channel data. |
 
-## Captured Frames
+## Historical Image-Processing Captures
 
 ### Original camera frame
 
 ![Original 1280 by 720 camera frame](assets/frames/captured_frame_original.jpg)
 
-The unmodified camera frame is 1280×720 and has three BGR channels. It is the source image before the fixed-size resize and subsequent preprocessing.
+This archived camera frame is 1280×720 and has three BGR channels. It is from the earlier image-processing experiment, not a guarantee of the current requested 640×480 camera mode.
 
 ### Resized color frame
 
 ![Resized 640 by 360 color frame](assets/frames/captured_frame_resizedframe.jpg)
 
-The image is reduced from 1280×720 to 640×360 while retaining three BGR channels. Its pixel dimensions, and therefore pixel count, are one quarter of the original. The smaller frame is the input to the grayscale conversion.
+This archived image was reduced from 1280×720 to 640×360 while retaining three BGR channels. Its pixel dimensions, and therefore pixel count, are one quarter of the original. The smaller frame was the input to the grayscale conversion.
 
 ### Grayscale frame
 
 ![Grayscale 640 by 360 frame](assets/frames/captured_frame_grayscale.jpg)
 
-The frame remains 640×360, but BGR color has been converted to one grayscale channel using `cv::cvtColor` and `cv::COLOR_BGR2GRAY`. It is the input to Gaussian blur, Canny, and the grayscale CLAHE profiling pass. The live window shows the separate Lab-lightness-enhanced result converted back to BGR.
+The frame remains 640×360, but BGR color has been converted to one grayscale channel using `cv::cvtColor` and `cv::COLOR_BGR2GRAY`. It was used for Gaussian blur, Canny, and the grayscale CLAHE profiling pass in the earlier pipeline.
 
 ## CLAHE
 
-Contrast Limited Adaptive Histogram Equalization (CLAHE) improves local contrast rather than applying one global histogram adjustment to the whole image. It divides the image into tiles, equalizes each tile's histogram, limits histogram amplification using a clip limit, and interpolates across tile boundaries to avoid visible seams. In this pipeline, the processor uses clip limit `2.0` and an `8×8` tile grid and is applied to `grayFrame` for timing. A second application enhances only the L channel of the Lab image; the original Lab a/b channels are retained to preserve color when converting the result back to BGR for display.
+Contrast Limited Adaptive Histogram Equalization (CLAHE) improves local contrast rather than applying one global histogram adjustment to the whole image. It divides the image into tiles, equalizes each tile's histogram, limits histogram amplification using a clip limit, and interpolates across tile boundaries to avoid visible seams. In the earlier pipeline, the processor used clip limit `2.0` and an `8×8` tile grid on `grayFrame` for timing. A second application enhanced only the L channel of the Lab image; the original Lab a/b channels were retained to preserve color when converting the result back to BGR.
 
 The clip limit controls how much local histogram peaks can be amplified. With the same image and `8×8` grid, increasing it from 2 to 4 to 8 produces progressively stronger local contrast. A higher value can reveal details in dark or bright local regions, but also makes sensor noise and texture more visible. The effect depends on the input image; the clip-limit value is not a direct contrast multiplier.
 
 | Clip limit 2 | Clip limit 4 | Clip limit 8 |
 | --- | --- | --- |
 | <img src="assets/frames/enhanced_frame_CLAHE(2,8X8).jpg" alt="CLAHE output with clip limit 2 and an 8 by 8 tile grid" width="240"> | <img src="assets/frames/enhanced_frame_CLAHE(4,8X8).jpg" alt="CLAHE output with clip limit 4 and an 8 by 8 tile grid" width="240"> | <img src="assets/frames/enhanced_frame_CLAHE(8,8X8).jpg" alt="CLAHE output with clip limit 8 and an 8 by 8 tile grid" width="240"> |
-| Lower, more restrained local contrast; the setting used by the current pipeline. | Stronger local contrast. | Strongest local contrast of these examples; fine texture and noise are more pronounced. |
+| Lower, more restrained local contrast; the setting used by the earlier pipeline. | Stronger local contrast. | Strongest local contrast of these examples; fine texture and noise are more pronounced. |
 
 ```text
 FPS: 30.1858 | Avg Capture: 17.7814 ms | Avg Grayscale: 0.144911 ms | Avg Blur: 0.128394 ms
@@ -155,12 +163,12 @@ OpenCV's `cv::Canny` takes a lower threshold and an upper threshold. It first es
 
 The thresholds are gradient-strength cutoffs, not image brightness values or percentages. Raising both thresholds makes detection more selective and usually produces fewer edges. Lowering them makes detection more sensitive, retaining weaker boundaries but potentially adding noise. The Gaussian blur before Canny suppresses small variations that could otherwise create unstable edges. Threshold values should be judged against the input image and desired edge detail.
 
-The live application currently uses `cv::Canny(blurredFrame, edges, 50, 150)`. The following saved 640×360 edge maps compare the three requested threshold pairs on the captured scene:
+The earlier image-processing pipeline used `cv::Canny(blurredFrame, edges, 50, 150)`. The following saved 640×360 edge maps compare the three requested threshold pairs on the captured scene:
 
 | Thresholds 25 and 75 | Thresholds 50 and 150 | Thresholds 100 and 200 |
 | --- | --- | --- |
 | <img src="assets/frames/captured_frame_canny(25,75).jpg" alt="Canny edges with thresholds 25 and 75" width="240"> | <img src="assets/frames/captured_frame_canny(50,150).jpg" alt="Canny edges with thresholds 50 and 150" width="240"> | <img src="assets/frames/captured_frame_canny(100,200).jpg" alt="Canny edges with thresholds 100 and 200" width="240"> |
-| More sensitive to weak gradients; more detail and potentially more noise survive. | The threshold pair used by the Canny stage; balances weak detail and suppression in this scene. | More selective; fewer, stronger contours remain, while some low-contrast detail may disappear. |
+| More sensitive to weak gradients; more detail and potentially more noise survive. | The threshold pair used by the earlier Canny stage; balances weak detail and suppression in this scene. | More selective; fewer, stronger contours remain, while some low-contrast detail may disappear. |
 
 ### Recorded profiling result
 
@@ -184,4 +192,4 @@ cd build && ./vision_app
 
 Run the executable from `build/` so the code's `../yolo26n.onnx` model path resolves to the model in the repository root. When using VS Code with CMake Tools, configure the CMake project so the OpenCV and ONNX Runtime include directories and libraries are available to the target.
 
-In the OpenCV window, press `s` to save the resized BGR input frame or `q` to quit. The camera must be accessible to the application; on macOS, grant camera permission to the terminal or application launching it.
+In the OpenCV window, press `s` to save the captured BGR frame or `q` to quit. The camera must be accessible to the application; on macOS, grant camera permission to the terminal or application launching it.

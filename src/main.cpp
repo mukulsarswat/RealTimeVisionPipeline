@@ -1,8 +1,11 @@
 #include <iostream>
 #include <chrono>
 #include <opencv2/opencv.hpp>
+
 #include <vector>
 #include <onnxruntime_cxx_api.h>
+#include <cstring>
+
 
 cv::Ptr<cv::CLAHE> clahe = cv::createCLAHE(2.0, cv::Size(8, 8));
 
@@ -294,24 +297,31 @@ cv::Mat convertToYOLOFloat(const cv::Mat &frame)
 }
 std::vector<float> convertHWCtoCHW(const cv::Mat &frame)
 {
+
     const int width = frame.cols;
     const int height = frame.rows;
     const int channels = frame.channels();
 
-    std::vector<float> chw(
-        channels * width * height);
+    const int channelSize = width * height;
 
+    // Split RGB image into 3 separate channels
+    std::vector<cv::Mat> channelMatrices;
+
+    cv::split(
+        frame,
+        channelMatrices);
+
+    // Allocate memory for CHW output
+    std::vector<float> chw(
+        channels * channelSize);
+
+    // Copy each channel into its CHW position
     for (int c = 0; c < channels; ++c)
     {
-        for (int y = 0; y < height; ++y)
-        {
-            for (int x = 0; x < width; ++x)
-            {
-                chw[c * width * height +
-                    y * width +
-                    x] = frame.at<cv::Vec3f>(y, x)[c];
-            }
-        }
+        std::memcpy(
+            chw.data() + c * channelSize,
+            channelMatrices[c].data,
+            channelSize * sizeof(float));
     }
 
     return chw;
@@ -522,6 +532,122 @@ cv::Rect mapDetectionToOriginalFrame(
         static_cast<int>(bottom - top));
 }
 
+float calculateIoU(
+    const Detection &a,
+    const Detection &b)
+{
+    float aLeft =
+        a.x - a.width / 2.0f;
+
+    float aTop =
+        a.y - a.height / 2.0f;
+
+    float aRight =
+        a.x + a.width / 2.0f;
+
+    float aBottom =
+        a.y + a.height / 2.0f;
+
+    float bLeft =
+        b.x - b.width / 2.0f;
+
+    float bTop =
+        b.y - b.height / 2.0f;
+
+    float bRight =
+        b.x + b.width / 2.0f;
+
+    float bBottom =
+        b.y + b.height / 2.0f;
+
+    float intersectionLeft =
+        std::max(aLeft, bLeft);
+
+    float intersectionTop =
+        std::max(aTop, bTop);
+
+    float intersectionRight =
+        std::min(aRight, bRight);
+
+    float intersectionBottom =
+        std::min(aBottom, bBottom);
+
+    float intersectionWidth =
+        std::max(
+            0.0f,
+            intersectionRight - intersectionLeft);
+
+    float intersectionHeight =
+        std::max(
+            0.0f,
+            intersectionBottom - intersectionTop);
+
+    float intersectionArea =
+        intersectionWidth * intersectionHeight;
+
+    float areaA =
+        a.width * a.height;
+
+    float areaB =
+        b.width * b.height;
+
+    float unionArea =
+        areaA + areaB - intersectionArea;
+
+    if (unionArea <= 0.0f)
+    {
+        return 0.0f;
+    }
+
+    return intersectionArea / unionArea;
+}
+std::vector<Detection> applyNMS(
+    const std::vector<Detection> &detections,
+    float iouThreshold)
+{
+    std::vector<Detection> result;
+
+    std::vector<bool> suppressed(
+        detections.size(),
+        false);
+
+    for (size_t i = 0; i < detections.size(); ++i)
+    {
+        if (suppressed[i])
+        {
+            continue;
+        }
+
+        result.push_back(detections[i]);
+
+        for (size_t j = i + 1; j < detections.size(); ++j)
+        {
+            if (suppressed[j])
+            {
+                continue;
+            }
+
+            if (detections[i].classId !=
+                detections[j].classId)
+            {
+                continue;
+            }
+
+            float iou =
+                calculateIoU(
+                    detections[i],
+                    detections[j]);
+
+            if (iou > iouThreshold)
+            {
+                suppressed[j] = true;
+            }
+        }
+    }
+
+    return result;
+}
+
 int main()
 {
 
@@ -529,6 +655,9 @@ int main()
         ORT_LOGGING_LEVEL_WARNING,
         "VisionPipeline");
     Ort::SessionOptions sessionOptions;
+
+    sessionOptions.SetGraphOptimizationLevel(
+        GraphOptimizationLevel::ORT_ENABLE_ALL);
 
     Ort::Session session(
         env,
@@ -569,6 +698,13 @@ int main()
               << CV_VERSION << std::endl;
 
     cv::VideoCapture cap(0);
+    cap.set(
+        cv::CAP_PROP_FRAME_WIDTH,
+        640);
+
+    cap.set(
+        cv::CAP_PROP_FRAME_HEIGHT,
+        480);
 
     if (!cap.isOpened())
     {
@@ -576,6 +712,24 @@ int main()
         return 1;
     }
 
+    double cameraFPS =
+        cap.get(cv::CAP_PROP_FPS);
+    double cameraWidth =
+        cap.get(cv::CAP_PROP_FRAME_WIDTH);
+
+    double cameraHeight =
+        cap.get(cv::CAP_PROP_FRAME_HEIGHT);
+
+    std::cout
+        << "Camera Resolution: "
+        << cameraWidth
+        << " x "
+        << cameraHeight
+        << std::endl;
+    std::cout
+        << "Camera FPS: "
+        << cameraFPS
+        << std::endl;
     std::cout << "Camera opened successfully!" << std::endl;
     std::cout << "Press 's' to save a frame." << std::endl;
     std::cout << "Press 'q' to quit." << std::endl;
@@ -592,27 +746,40 @@ int main()
     double fps = 0.0;
     int captureSamples = 0;
 
-    double totalGrayTime = 0.0;
-    int graySamples = 0;
+    // double totalGrayTime = 0.0;
+    // int graySamples = 0;
 
-    double totalBlurTime = 0.0;
-    int blurSamples = 0;
+    // double totalBlurTime = 0.0;
+    // int blurSamples = 0;
 
-    double totalCannyTime = 0.0;
-    int cannySamples = 0;
+    // double totalCannyTime = 0.0;
+    // int cannySamples = 0;
 
-    double totalClaheTime = 0.0;
-    int claheSamples = 0;
+    // double totalClaheTime = 0.0;
+    // int claheSamples = 0;
     double totalPreprocessTime = 0.0;
     int preprocessSamples = 0;
 
+    auto fpsStart = std::chrono::steady_clock::now();
+
+    int frameCount1 = 0;
+    double totalInferenceTime = 0.0;
+
     while (true)
     {
+        auto frameStart = std::chrono::steady_clock::now();
 
         auto captureStart = std::chrono::steady_clock::now();
 
-        cap >> frame;
+        cap.read(frame);
         auto captureEnd = std::chrono::steady_clock::now();
+        double captureTime =
+            calculateTimeDifference(captureStart, captureEnd);
+
+        std::cout << "Capture Time: "
+                  << captureTime
+                  << " ms"
+                  << std::endl;
 
         if (frame.empty())
         {
@@ -620,18 +787,64 @@ int main()
             break;
         }
         // cv::Mat yoloFrame = prepareYOLOFrame(frame);
+        auto yoloPreprocessStart =
+            std::chrono::steady_clock::now();
+
+        auto letterboxStart =
+            std::chrono::steady_clock::now();
+
         LetterboxResult letterbox =
             prepareYOLOFrame(frame);
 
+        auto letterboxEnd =
+            std::chrono::steady_clock::now();
+        double letterboxTime =
+            std::chrono::duration<double, std::milli>(
+                letterboxEnd - letterboxStart)
+                .count();
+
         cv::Mat yoloFrame =
             letterbox.image;
+
+        auto floatStart =
+            std::chrono::steady_clock::now();
+
         cv::Mat yoloFloatFrame =
             convertToYOLOFloat(yoloFrame);
+
+        auto floatEnd =
+            std::chrono::steady_clock::now();
+        double floatTime =
+            std::chrono::duration<double, std::milli>(
+                floatEnd - floatStart)
+                .count();
+
+        auto chwStart =
+            std::chrono::steady_clock::now();
+
         std::vector<float> inputTensorValues =
             convertHWCtoCHW(yoloFloatFrame);
 
-        double captureTime =
-            calculateTimeDifference(captureStart, captureEnd);
+        auto chwEnd =
+            std::chrono::steady_clock::now();
+
+        double chwTime =
+            std::chrono::duration<double, std::milli>(
+                chwEnd - chwStart)
+                .count();
+
+        auto yoloPreprocessEnd =
+            std::chrono::steady_clock::now();
+
+        double yoloPreprocessTime =
+            std::chrono::duration<double, std::milli>(
+                yoloPreprocessEnd - yoloPreprocessStart)
+                .count();
+
+        std::cout << "YOLO Preprocess Time: "
+                  << yoloPreprocessTime
+                  << " ms"
+                  << std::endl;
         totalCaptureTime += captureTime;
         captureSamples++;
 
@@ -655,6 +868,10 @@ int main()
 
         const char *outputNames[] = {
             outputName};
+
+        auto inferenceStart =
+            std::chrono::high_resolution_clock::now();
+
         auto outputTensors = session.Run(
             Ort::RunOptions{nullptr},
             inputNames,
@@ -662,182 +879,319 @@ int main()
             1,
             outputNames,
             1);
-        auto preprocessStart = std::chrono::steady_clock::now();
-        cv::Mat resizedFrame;
-        cv::Mat labFrame;
-        cv::Mat originalL;
-        cv::Mat enhancedL;
-        cv::Mat enhancedBGR =
-            preprocessFrame(frame, resizedFrame, labFrame, originalL, enhancedL);
-        auto preprocessEnd = std::chrono::steady_clock::now();
 
-        double preprocessTime =
-            calculateTimeDifference(preprocessStart, preprocessEnd);
-        totalPreprocessTime += preprocessTime;
-        preprocessSamples++;
+        auto inferenceEnd =
+            std::chrono::high_resolution_clock::now();
 
-        auto grayStart = std::chrono::steady_clock::now();
-        cv::Mat grayFrame = convertToGrayscale(resizedFrame);
-        auto grayEnd = std::chrono::steady_clock::now();
+        double inferenceTime =
+            std::chrono::duration<double, std::milli>(
+                inferenceEnd - inferenceStart)
+                .count();
+        double currentInferenceTime =
+            std::chrono::duration<double, std::milli>(
+                inferenceEnd - inferenceStart)
+                .count();
 
-        double grayTime =
-            calculateTimeDifference(grayStart, grayEnd);
-        totalGrayTime += grayTime;
-        graySamples++;
+        std::cout
+            << "Current Inference: "
+            << currentInferenceTime
+            << " ms"
+            << std::endl;
 
-        cv::Mat normalizedFrame = normalizeGrayscale(grayFrame);
+        auto outputInfo =
+            outputTensors[0].GetTensorTypeAndShapeInfo();
 
-        auto blurStart = std::chrono::steady_clock::now();
-        cv::Mat blurredFrame = blurFrame(grayFrame, 5);
-        auto blurEnd = std::chrono::steady_clock::now();
+        auto outputShape =
+            outputInfo.GetShape();
 
-        double blurTime =
-            calculateTimeDifference(blurStart, blurEnd);
-        totalBlurTime += blurTime;
-        blurSamples++;
+        float *outputData =
+            outputTensors[0].GetTensorMutableData<float>();
 
-        auto cannyStart = std::chrono::steady_clock::now();
-        cv::Mat edges = cannyEdgeDetection(blurredFrame, 50, 150);
+        auto decodeStart =
+            std::chrono::high_resolution_clock::now();
 
-        auto cannyEnd = std::chrono::steady_clock::now();
-        double cannyTime =
-            calculateTimeDifference(cannyStart, cannyEnd);
-        totalCannyTime += cannyTime;
-        cannySamples++;
+        std::vector<Detection> detections =
+            decodeDetections(
+                outputData,
+                8400,
+                80,
+                0.50f);
 
-        auto claheStart = std::chrono::steady_clock::now();
-        cv::Mat claheFrame;
-        clahe->apply(grayFrame, claheFrame);
-        auto claheEnd =
-            std::chrono::steady_clock::now();
+        auto decodeEnd =
+            std::chrono::high_resolution_clock::now();
 
-        double claheTime =
-            calculateTimeDifference(claheStart, claheEnd);
-        totalClaheTime += claheTime;
-        claheSamples++;
+        double decodeTime =
+            std::chrono::duration<double, std::milli>(
+                decodeEnd - decodeStart)
+                .count();
+        std::cout << "Decode Time: "
+                  << decodeTime
+                  << " ms"
+                  << std::endl;
+        auto nmsStart =
+            std::chrono::high_resolution_clock::now();
 
-        cv::Mat hsvFrame;
-        cv::cvtColor(resizedFrame, hsvFrame, cv::COLOR_BGR2HSV);
+        std::vector<Detection> finalDetections =
+            applyNMS(
+                detections,
+                0.45f);
 
-        cv::Scalar originalMean;
-        cv::Scalar originalStdDev;
+        auto nmsEnd =
+            std::chrono::high_resolution_clock::now();
 
-        cv::Scalar enhancedMean;
-        cv::Scalar enhancedStdDev;
+        double nmsTime =
+            std::chrono::duration<double, std::milli>(
+                nmsEnd - nmsStart)
+                .count();
 
-        cv::meanStdDev(
-            originalL,
-            originalMean,
-            originalStdDev);
+        std::cout
+            << "NMS: "
+            << nmsTime
+            << " ms"
+            << std::endl;
+        auto drawStart =
+            std::chrono::high_resolution_clock::now();
 
-        cv::meanStdDev(
-            enhancedL,
-            enhancedMean,
-            enhancedStdDev);
+        for (const Detection &detection : finalDetections)
+        {
+            cv::Rect box =
+                mapDetectionToOriginalFrame(
+                    detection,
+                    letterbox,
+                    frame.size());
 
-        cv::Mat originalHist;
-        cv::Mat enhancedHist;
-        int histSize = 256;
+            drawDetection(
+                frame,
+                detection,
+                box);
+        }
 
-        float range[] = {0, 256};
-        const float *histRange = {range};
+        auto drawEnd =
+            std::chrono::high_resolution_clock::now();
 
-        cv::calcHist(
-            &originalL,
-            1,
-            nullptr,
-            cv::Mat(),
-            originalHist,
-            1,
-            &histSize,
-            &histRange);
+        double drawTime =
+            std::chrono::duration<double, std::milli>(
+                drawEnd - drawStart)
+                .count();
 
-        cv::calcHist(
-            &enhancedL,
-            1,
-            nullptr,
-            cv::Mat(),
-            enhancedHist,
-            1,
-            &histSize,
-            &histRange);
-        int ranges[][2] = {
-            {0, 49},
-            {50, 99},
-            {100, 149},
-            {150, 199},
-            {200, 255}};
+        std::cout
+            << "Drawing: "
+            << drawTime
+            << " ms"
+            << std::endl;
+        totalInferenceTime += inferenceTime;
+        frameCount1++;
+        if (frameCount1 % 30 == 0)
+        {
+            double averageInference =
+                totalInferenceTime / frameCount1;
+
+            auto now =
+                std::chrono::steady_clock::now();
+
+            double elapsedSeconds =
+                std::chrono::duration<double>(
+                    now - fpsStart)
+                    .count();
+
+            double fps =
+                frameCount1 / elapsedSeconds;
+
+            std::cout << "FPS: "
+                      << fps
+                      << " | Avg Inference: "
+                      << averageInference
+                      << " ms"
+                      << "| Inference Time: "
+                      << inferenceTime
+                      << " ms"
+                      << std::endl;
+
+            std::cout << "YOLO Preprocess: "
+                      << yoloPreprocessTime
+                      << " ms"
+                      << std::endl;
+
+            std::cout << "Letterbox: "
+                      << letterboxTime
+                      << " ms" << std::endl;
+
+            std::cout << "Float conversion: "
+                      << floatTime
+                      << " ms" << std::endl;
+
+            std::cout << "HWC -> CHW: "
+                      << chwTime
+                      << " ms" << std::endl;
+        }
+
+        // std::cout << "Inference: "
+        //           << inferenceTime
+        //           << " ms"
+        //           << std::endl;
+        // auto preprocessStart = std::chrono::steady_clock::now();
+        // cv::Mat resizedFrame;
+        // cv::Mat labFrame;
+        // cv::Mat originalL;
+        // cv::Mat enhancedL;
+        // cv::Mat enhancedBGR =
+        //     preprocessFrame(frame, resizedFrame, labFrame, originalL, enhancedL);
+        // auto preprocessEnd = std::chrono::steady_clock::now();
+
+        // double preprocessTime =
+        //     calculateTimeDifference(preprocessStart, preprocessEnd);
+        // totalPreprocessTime += preprocessTime;
+        // preprocessSamples++;
+
+        // auto grayStart = std::chrono::steady_clock::now();
+        // cv::Mat grayFrame = convertToGrayscale(resizedFrame);
+        // auto grayEnd = std::chrono::steady_clock::now();
+
+        // double grayTime =
+        //     calculateTimeDifference(grayStart, grayEnd);
+        // totalGrayTime += grayTime;
+        // graySamples++;
+
+        // cv::Mat normalizedFrame = normalizeGrayscale(grayFrame);
+
+        // auto blurStart = std::chrono::steady_clock::now();
+        // cv::Mat blurredFrame = blurFrame(grayFrame, 5);
+        // auto blurEnd = std::chrono::steady_clock::now();
+
+        // double blurTime =
+        //     calculateTimeDifference(blurStart, blurEnd);
+        // totalBlurTime += blurTime;
+        // blurSamples++;
+
+        // auto cannyStart = std::chrono::steady_clock::now();
+        // cv::Mat edges = cannyEdgeDetection(blurredFrame, 50, 150);
+
+        // auto cannyEnd = std::chrono::steady_clock::now();
+        // double cannyTime =
+        //     calculateTimeDifference(cannyStart, cannyEnd);
+        // totalCannyTime += cannyTime;
+        // cannySamples++;
+
+        // auto claheStart = std::chrono::steady_clock::now();
+        // cv::Mat claheFrame;
+        // clahe->apply(grayFrame, claheFrame);
+        // auto claheEnd =
+        //     std::chrono::steady_clock::now();
+
+        // double claheTime =
+        //     calculateTimeDifference(claheStart, claheEnd);
+        // totalClaheTime += claheTime;
+        // claheSamples++;
+
+        // cv::Mat hsvFrame;
+        // cv::cvtColor(resizedFrame, hsvFrame, cv::COLOR_BGR2HSV);
+
+        // cv::Scalar originalMean;
+        // cv::Scalar originalStdDev;
+
+        // cv::Scalar enhancedMean;
+        // cv::Scalar enhancedStdDev;
+
+        // cv::meanStdDev(
+        //     originalL,
+        //     originalMean,
+        //     originalStdDev);
+
+        // cv::meanStdDev(
+        //     enhancedL,
+        //     enhancedMean,
+        //     enhancedStdDev);
+
+        // cv::Mat originalHist;
+        // cv::Mat enhancedHist;
+        // int histSize = 256;
+
+        // float range[] = {0, 256};
+        // const float *histRange = {range};
+
+        // cv::calcHist(
+        //     &originalL,
+        //     1,
+        //     nullptr,
+        //     cv::Mat(),
+        //     originalHist,
+        //     1,
+        //     &histSize,
+        //     &histRange);
+
+        // cv::calcHist(
+        //     &enhancedL,
+        //     1,
+        //     nullptr,
+        //     cv::Mat(),
+        //     enhancedHist,
+        //     1,
+        //     &histSize,
+        //     &histRange);
+        // int ranges[][2] = {
+        //     {0, 49},
+        //     {50, 99},
+        //     {100, 149},
+        //     {150, 199},
+        //     {200, 255}};
 
         frameCount++;
 
         // Inspect the first frame
         if (firstFrame)
         {
-            printFrameInfo(frame, "Original Frame");
-            printFrameInfo(resizedFrame, "Resized Frame");
-            printFrameInfo(grayFrame, "Grayscale Frame");
-            printFrameInfo(normalizedFrame, "Normalized Grayscale Frame");
-            printFrameInfo(hsvFrame, "HSV Frame");
-            printFrameInfo(labFrame, "LAB Frame");
-            printFrameInfo(yoloFrame, "YOLO Input Frame");
-            printFrameInfo(yoloFloatFrame, "YOLO Float Frame");
-            printHistogram(originalHist, "Original");
-            printHistogram(enhancedHist, "Enhanced");
-            printHistogramComparison(originalHist, enhancedHist);
-            printCLAHEStats(originalL, enhancedL);
+            // printFrameInfo(frame, "Original Frame");
+            // printFrameInfo(resizedFrame, "Resized Frame");
+            // printFrameInfo(grayFrame, "Grayscale Frame");
+            // printFrameInfo(normalizedFrame, "Normalized Grayscale Frame");
+            // printFrameInfo(hsvFrame, "HSV Frame");
+            // printFrameInfo(labFrame, "LAB Frame");
+            // printFrameInfo(yoloFrame, "YOLO Input Frame");
+            // printFrameInfo(yoloFloatFrame, "YOLO Float Frame");
+            // printHistogram(originalHist, "Original");
+            // printHistogram(enhancedHist, "Enhanced");
+            // printHistogramComparison(originalHist, enhancedHist);
+            // printCLAHEStats(originalL, enhancedL);
 
-            pixelValueAt(frame, 0, 0, "Original Frame");
-            pixelValueAt(resizedFrame, 0, 0, "Resized Frame");
-            pixelValueAt(grayFrame, 0, 0, "Grayscale Frame");
-            pixelValueAt(normalizedFrame, 0, 0, "Normalized Grayscale Frame");
-            pixelValueAt(hsvFrame, 0, 0, "HSV Frame");
-            pixelValueAt(labFrame, 0, 0, "LAB Frame");
-            std::cout << "YOLO Tensor Values: "
-                      << inputTensorValues.size()
-                      << std::endl;
-            std::cout << "ONNX Tensor Created" << std::endl;
-            auto outputInfo =
-                outputTensors[0].GetTensorTypeAndShapeInfo();
+            // pixelValueAt(frame, 0, 0, "Original Frame");
+            // pixelValueAt(resizedFrame, 0, 0, "Resized Frame");
+            // pixelValueAt(grayFrame, 0, 0, "Grayscale Frame");
+            // pixelValueAt(normalizedFrame, 0, 0, "Normalized Grayscale Frame");
+            // pixelValueAt(hsvFrame, 0, 0, "HSV Frame");
+            // pixelValueAt(labFrame, 0, 0, "LAB Frame");
+            // std::cout << "YOLO Tensor Values: "
+            //           << inputTensorValues.size()
+            //           << std::endl;
+            // std::cout << "ONNX Tensor Created" << std::endl;
 
-            auto outputShape =
-                outputInfo.GetShape();
+            // std::cout << "Detections above threshold: "
+            //           << detections.size()
+            //           << std::endl;
 
-            std::cout << "YOLO Output Shape: ";
+            // for (const Detection &detection : detections)
+            // {
+            //     std::cout << "Class: "
+            //               << detection.classId
+            //               << " | Confidence: "
+            //               << detection.confidence
+            //               << " | X: "
+            //               << detection.x
+            //               << " | Y: "
+            //               << detection.y
+            //               << " | W: "
+            //               << detection.width
+            //               << " | H: "
+            //               << detection.height
+            //               << std::endl;
+            // }
 
-            for (auto dim : outputShape)
-            {
-                std::cout << dim << " ";
-            }
-            float *outputData =
-                outputTensors[0].GetTensorMutableData<float>();
+            // std::cout << "Raw detections: "
+            //           << detections.size()
+            //           << std::endl;
 
-            std::vector<Detection> detections =
-                decodeDetections(
-                    outputData,
-                    8400,
-                    80,
-                    0.50f);
-
-            std::cout << "Detections above threshold: "
-                        << detections.size()
-                        << std::endl;
-
-            for (const Detection& detection : detections)
-            {
-                std::cout << "Class: "
-                        << detection.classId
-                        << " | Confidence: "
-                        << detection.confidence
-                        << " | X: "
-                        << detection.x
-                        << " | Y: "
-                        << detection.y
-                        << " | W: "
-                        << detection.width
-                        << " | H: "
-                        << detection.height
-                        << std::endl;
-            }
+            // std::cout << "After NMS: "
+            //           << finalDetections.size()
+            //           << std::endl;
 
             // std::cout << "First 10 output values:" << std::endl;
 
@@ -914,82 +1268,124 @@ int main()
         }
 
         // Display live camera
-        cv::imshow("Real-Time Vision Pipeline", enhancedBGR);
+        // cv::rectangle(
+        //     frame,
+        //     cv::Rect(100, 100, 300, 300),
+        //     cv::Scalar(0, 255, 0),
+        //     3
+        // );
+
+        auto displayStart =
+            std::chrono::high_resolution_clock::now();
+
+        cv::imshow(
+            "YOLO Detection",
+            frame);
+
+        cv::waitKey(1);
+
+        auto displayEnd =
+            std::chrono::high_resolution_clock::now();
+
+        double displayTime =
+            std::chrono::duration<double, std::milli>(
+                displayEnd - displayStart)
+                .count();
+
+        std::cout
+            << "Display: "
+            << displayTime
+            << " ms"
+            << std::endl;
+        // cv::imshow("Real-Time Vision Pipeline", frame);
 
         char key = static_cast<char>(cv::waitKey(1));
+        auto frameEnd = std::chrono::steady_clock::now();
+
+        double frameTime =
+            std::chrono::duration<double, std::milli>(
+                frameEnd - frameStart)
+                .count();
         auto currentTime = std::chrono::steady_clock::now();
 
         double elapsedSeconds =
             std::chrono::duration<double>(
                 currentTime - startTime)
                 .count();
+        if (frameCount1 % 30 == 0)
+        {
+            std::cout << "Total Frame Time: "
+                      << frameTime
+                      << " ms"
+                      << std::endl;
+        }
 
-        if (elapsedSeconds >= 10.0)
+        if (elapsedSeconds >= 1.0)
         {
             fps = static_cast<double>(frameCount) / elapsedSeconds;
             averageCaptureTime = captureSamples > 0 ? totalCaptureTime / captureSamples : 0.0;
 
-            double averageGrayTime =
-                graySamples > 0 ? totalGrayTime / graySamples : 0.0;
+            // double averageGrayTime =
+            //     graySamples > 0 ? totalGrayTime / graySamples : 0.0;
 
-            std::cout << "FPS: "
-                      << fps
-                      << " | Avg Capture: "
-                      << averageCaptureTime
-                      << " ms"
-                      << " | Avg Grayscale: "
-                      << averageGrayTime
-                      << " ms"
-                      << std::endl;
+            // std::cout << "FPS: "
+            //           << fps
+            //           << " | Avg Capture: "
+            //           << averageCaptureTime
+            //           << " ms"
+            //           << " | Avg Grayscale: "
+            //           << averageGrayTime
+            //           << " ms"
+            //           << std::endl;
 
-            double averageBlurTime =
-                blurSamples > 0 ? totalBlurTime / blurSamples : 0.0;
+            // double averageBlurTime =
+            //     blurSamples > 0 ? totalBlurTime / blurSamples : 0.0;
 
-            std::cout << "FPS: "
-                      << fps
-                      << " | Avg Capture: "
-                      << averageCaptureTime
-                      << " ms"
-                      << " | Avg Grayscale: "
-                      << averageGrayTime
-                      << " ms"
-                      << " | Avg Blur: "
-                      << averageBlurTime
-                      << " ms"
-                      << std::endl;
+            // std::cout << "FPS: "
+            //           << fps
+            //           << " | Avg Capture: "
+            //           << averageCaptureTime
+            //           << " ms"
+            //           << " | Avg Grayscale: "
+            //           << averageGrayTime
+            //           << " ms"
+            //           << " | Avg Blur: "
+            //           << averageBlurTime
+            //           << " ms"
+            //           << std::endl;
 
-            double averageCannyTime =
-                cannySamples > 0 ? totalCannyTime / cannySamples : 0.0;
+            // double averageCannyTime =
+            //     cannySamples > 0 ? totalCannyTime / cannySamples : 0.0;
 
-            std::cout << " | Avg Canny: "
-                      << averageCannyTime
-                      << " ms"
-                      << std::endl;
+            // std::cout << " | Avg Canny: "
+            //           << averageCannyTime
+            //           << " ms"
+            //           << std::endl;
 
-            double averageClaheTime =
-                claheSamples > 0 ? totalClaheTime / claheSamples : 0.0;
+            // double averageClaheTime =
+            //     claheSamples > 0 ? totalClaheTime / claheSamples : 0.0;
 
-            std::cout << " | Avg CLAHE: "
-                      << averageClaheTime
-                      << " ms"
-                      << std::endl;
+            // std::cout << " | Avg CLAHE: "
+            //           << averageClaheTime
+            //           << " ms"
+            //           << std::endl;
 
             double averagePreprocessTime =
                 preprocessSamples > 0 ? totalPreprocessTime / preprocessSamples : 0.0;
 
-            std::cout << " | Avg Preprocess: "
-                      << averagePreprocessTime
-                      << " ms"
-                      << std::endl;
+            // std::cout << " | Avg Preprocess: "
+            //           << averagePreprocessTime
+            //           << " ms"
+            //           << std::endl;
 
-            totalGrayTime = 0.0;
-            graySamples = 0;
-            totalBlurTime = 0.0;
-            blurSamples = 0;
-            totalCannyTime = 0.0;
-            cannySamples = 0;
-            totalClaheTime = 0.0;
-            claheSamples = 0;
+            // totalGrayTime = 0.0;
+            // graySamples = 0;
+            // totalBlurTime = 0.0;
+            // blurSamples = 0;
+            // totalCannyTime = 0.0;
+            // cannySamples = 0;
+            // totalClaheTime = 0.0;
+            // claheSamples = 0;
             totalCaptureTime = 0.0;
             captureSamples = 0;
             totalPreprocessTime = 0.0;
@@ -999,7 +1395,7 @@ int main()
         // Save frame
         if (key == 's')
         {
-            cv::imwrite("original_frame_BGR.jpg", resizedFrame);
+            cv::imwrite("original_frame_BGR.jpg", frame);
             std::cout << "Frame saved as original_frame_BGR.jpg"
                       << std::endl;
         }
