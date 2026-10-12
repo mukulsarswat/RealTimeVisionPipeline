@@ -6,10 +6,13 @@ A small C++17 application using OpenCV and ONNX Runtime. It reads frames from th
 
 The application is implemented in [`src/main.cpp`](src/main.cpp) and runs these active stages for each camera frame:
 
-1. **Camera acquisition**: opens camera device 0, requests 640×480 using `CAP_PROP_FRAME_WIDTH` and `CAP_PROP_FRAME_HEIGHT`, and prints the camera-reported resolution and FPS. The requested mode may not be supported; the reported properties are the values returned by the capture backend.
-2. **YOLO input preparation**: preserves the captured frame's aspect ratio while resizing it to fit 640×640, centers it on a value-114 letterbox, converts BGR to RGB, scales pixels to float `[0,1]`, and packs the image in NCHW order.
-3. **Inference and detections**: ONNX Runtime evaluates the `[1, 3, 640, 640]` input. Candidate detections are confidence-filtered and passed through NMS; remaining boxes are mapped back to the captured-frame coordinates and drawn on the live image.
-4. **Display and keyboard input**: displays the annotated frame in the `YOLO Detection` window. Press `q` to exit. The current loop calls `waitKey(1)` during display and again when checking the key.
+1. **Camera capture thread**: opens camera device 0, requests 640×480 using `CAP_PROP_FRAME_WIDTH` and `CAP_PROP_FRAME_HEIGHT`, and prints the camera-reported resolution and FPS. A dedicated thread continuously reads frames and publishes the latest one; the requested mode may not be supported, so the reported properties come from the capture backend.
+2. **Frame handoff**: a mutex protects the shared latest-frame `cv::Mat` while the capture thread publishes a new frame and the processing thread copies a snapshot. The processing loop does not wait for one camera read per inference iteration; it works on the most recently available frame, and intermediate camera frames can be skipped rather than queued.
+3. **YOLO input preparation**: preserves the captured frame's aspect ratio while resizing it to fit 640×640, centers it on a value-114 letterbox, converts BGR to RGB, scales pixels to float `[0,1]`, and packs the image in NCHW order.
+4. **Inference and detections**: ONNX Runtime evaluates the `[1, 3, 640, 640]` input. Candidate detections are confidence-filtered and passed through NMS; remaining boxes are mapped back to the captured-frame coordinates and drawn on the live image.
+5. **Display and keyboard input**: displays the annotated frame in the `YOLO Detection` window. Press `q` to exit.
+
+An atomic `cameraRunning` flag coordinates shutdown: the main thread clears it when processing exits, then joins the capture thread before releasing the camera.
 
 The former grayscale, Canny, CLAHE, HSV/Lab conversion, histogram, and diagnostic-printing pipeline is retained in the source but commented out in the active loop. The historical images and descriptions below document those earlier experiments.
 
@@ -74,11 +77,11 @@ This kept each image-processing step understandable while giving `main()` a clea
 
 ## Profiling and Bottleneck Notes
 
-The active YOLO loop uses `std::chrono` timers in `main()` to inspect time spent at each major stage. It prints per-frame measurements and reports FPS every 30 processed frames. FPS is computed from the total processed-frame count and elapsed time since the loop started, so it is a cumulative rate sampled every 30 frames, not a rolling 30-frame average.
+The active YOLO loop uses `std::chrono` timers in `main()` to inspect time spent at each major stage. It prints per-frame measurements and reports processing FPS over approximately 0.5-second windows. The counter and window start time are reset after each report, so this is a short-window rate rather than a cumulative rate since application startup.
 
 | Measurement printed by the application | Work included |
 | --- | --- |
-| `Capture Time` | The `cap.read(frame)` camera read/wait. |
+| `Capture Time` | The processing thread's mutex-protected copy of the latest published frame. Camera reading itself happens concurrently in the capture thread and is not included in this timer. |
 | `Letterbox` | Aspect-ratio-preserving resize and placement on the 640×640 padded canvas. |
 | `Float conversion` | Conversion to `CV_32FC3` and normalization by `1/255`. |
 | `HWC -> CHW` | `cv::split` of RGB channels and `memcpy` into the planar model-input tensor. |
@@ -88,8 +91,9 @@ The active YOLO loop uses `std::chrono` timers in `main()` to inspect time spent
 | `NMS` | Non-maximum suppression over the filtered detections. |
 | `Drawing` | Mapping boxes to the camera-frame coordinates and drawing labels/rectangles. |
 | `Display` | `imshow` and one `waitKey(1)` call. |
-| `Total Frame Time` | Time from the beginning of the loop iteration through processing, display, console output, and the second `waitKey(1)` call. |
-| `FPS` | Processed frames divided by elapsed wall time since `fpsStart`; printed every 30 processed frames. |
+| `imshow` / `waitKey` | The current code reports `imshow` and `waitKey(1)` separately. |
+| `Processing FPS` | Frames completed by the processing loop divided by elapsed time in the current approximately 0.5-second reporting window. It excludes camera frames that were captured but superseded before processing. |
+| `Total Frame Time` | A separate timer around one processing-loop iteration; its print condition uses the older `frameCount1` counter and may not align with every processing-FPS report. |
 
 ### Optimizations tried and observed impact
 
@@ -99,7 +103,10 @@ The active YOLO loop uses `std::chrono` timers in `main()` to inspect time spent
 - **Camera capture mode:** the application requests 640×480 and prints the capture backend's reported resolution and FPS. Compared with the earlier 1280×720 mode, 640×480 contains one third as many camera pixels, reducing camera-frame transfer and work performed before model input preparation. A camera backend may ignore the requested size, so check the reported resolution.
 - **Letterboxing and model input size:** the captured image is still letterboxed to a fixed 640×640 tensor. For a 640×480 source, the resized image occupies 640×480 with padding above and below. Thus reducing the camera capture resolution does **not** reduce the ONNX model's 640×640 input shape or its per-inference tensor dimensions.
 
-Despite these changes, the measured end-to-end FPS did not improve significantly in the observed run. Faster tensor packing alone may have little effect if it is a small fraction of total frame time; the fixed-size model inference, camera read/wait, display, and per-frame console output remain in the pipeline. Use repeated timing runs under the same camera/backend and machine conditions to determine which stage dominates. No universal timing numbers are recorded here because they vary by device and runtime. Camera-reported FPS is also backend metadata and may be unavailable or zero; compare it with the application's measured FPS.
+- **Decoupled capture and processing:** a dedicated `std::thread` reads camera frames while the main thread performs preprocessing, inference, post-processing, and display. The producer replaces a shared latest-frame image; the consumer copies it while holding the same `std::mutex`. This avoids serializing camera reads with inference and prevents a backlog of stale frames. If processing is slower than capture, some captured frames are intentionally skipped, favoring low latency over processing every frame.
+- **Thread coordination:** `std::atomic<bool> cameraRunning` signals the capture worker to stop. On exit, the main thread clears the flag and joins the worker before releasing `VideoCapture`, avoiding access to the camera after release.
+- **Observed FPS change:** after separating capture and processing and reducing avoidable waiting/work in the processing path, the reported processing FPS increased from approximately **13–14 FPS to 39–40 FPS** in the observed run (roughly 2.9× throughput). This is the application's processing-loop FPS, not a claim that the camera itself captures at 39–40 FPS. Treat it as a run-specific observation; the result depends on camera/backend, machine, ONNX Runtime execution provider, and workload.
+- **Remaining measurement caveat:** timing and per-frame console output add work and can affect measured throughput. Compare runs under the same conditions and distinguish the processing loop's rate from camera-reported FPS and camera capture rate. Camera-reported FPS is backend metadata and may be unavailable or zero.
 
 The older grayscale/Canny/CLAHE FPS samples below belong to the earlier image-processing pipeline and are not measurements of the current YOLO loop.
 

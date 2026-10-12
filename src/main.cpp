@@ -5,7 +5,10 @@
 #include <vector>
 #include <onnxruntime_cxx_api.h>
 #include <cstring>
-
+#include <thread>
+#include <mutex>
+#include <atomic>
+#include <coreml_provider_factory.h>
 
 cv::Ptr<cv::CLAHE> clahe = cv::createCLAHE(2.0, cv::Size(8, 8));
 
@@ -253,27 +256,24 @@ LetterboxResult prepareYOLOFrame(const cv::Mat &frame)
     cv::Mat letterboxed(
         targetHeight,
         targetWidth,
-        resized.type(),
+        frame.type(),
         cv::Scalar(114, 114, 114));
 
-    int xOffset =
-        (targetWidth - newWidth) / 2;
+    int xOffset = (targetWidth - newWidth) / 2;
+    int yOffset = (targetHeight - newHeight) / 2;
 
-    int yOffset =
-        (targetHeight - newHeight) / 2;
+    cv::Mat roi = letterboxed(
+        cv::Rect(xOffset, yOffset, newWidth, newHeight));
 
-    resized.copyTo(
-        letterboxed(
-            cv::Rect(
-                xOffset,
-                yOffset,
-                newWidth,
-                newHeight)));
+    cv::resize(
+        frame,
+        roi,
+        cv::Size(newWidth, newHeight));
 
-    cv::cvtColor(
-        letterboxed,
-        letterboxed,
-        cv::COLOR_BGR2RGB);
+    // cv::cvtColor(
+    //     letterboxed,
+    //     letterboxed,
+    //     cv::COLOR_BGR2RGB);
 
     LetterboxResult result;
 
@@ -295,27 +295,29 @@ cv::Mat convertToYOLOFloat(const cv::Mat &frame)
 
     return floatFrame;
 }
-std::vector<float> convertHWCtoCHW(const cv::Mat &frame)
-{
 
+void convertHWCtoCHW(
+    const cv::Mat &frame,
+    std::vector<cv::Mat> &channelMatrices,
+    std::vector<float> &chw)
+{
     const int width = frame.cols;
     const int height = frame.rows;
     const int channels = frame.channels();
-
     const int channelSize = width * height;
 
-    // Split RGB image into 3 separate channels
-    std::vector<cv::Mat> channelMatrices;
+    // Reuse the channel matrix vector.
+    cv::split(frame, channelMatrices);
 
-    cv::split(
-        frame,
-        channelMatrices);
+    // Allocate only when the required size changes.
+    const size_t requiredSize =
+        static_cast<size_t>(channels) * channelSize;
 
-    // Allocate memory for CHW output
-    std::vector<float> chw(
-        channels * channelSize);
+    if (chw.size() != requiredSize)
+    {
+        chw.resize(requiredSize);
+    }
 
-    // Copy each channel into its CHW position
     for (int c = 0; c < channels; ++c)
     {
         std::memcpy(
@@ -323,9 +325,8 @@ std::vector<float> convertHWCtoCHW(const cv::Mat &frame)
             channelMatrices[c].data,
             channelSize * sizeof(float));
     }
-
-    return chw;
 }
+
 struct Detection
 {
     float x;
@@ -647,6 +648,29 @@ std::vector<Detection> applyNMS(
 
     return result;
 }
+cv::Mat latestFrame;
+
+std::mutex frameMutex;
+
+std::atomic<bool> cameraRunning(true);
+void cameraThread(cv::VideoCapture &cap)
+{
+    while (cameraRunning)
+    {
+        cv::Mat newFrame;
+
+        if (!cap.read(newFrame))
+        {
+            continue;
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(frameMutex);
+
+            newFrame.copyTo(latestFrame);
+        }
+    }
+}
 
 int main()
 {
@@ -654,15 +678,18 @@ int main()
     Ort::Env env(
         ORT_LOGGING_LEVEL_WARNING,
         "VisionPipeline");
+
     Ort::SessionOptions sessionOptions;
 
     sessionOptions.SetGraphOptimizationLevel(
         GraphOptimizationLevel::ORT_ENABLE_ALL);
 
-    Ort::Session session(
-        env,
-        "../yolo26n.onnx",
-        sessionOptions);
+    Ort::ThrowOnError(
+        OrtSessionOptionsAppendExecutionProvider_CoreML(
+            sessionOptions, COREML_FLAG_ENABLE_ON_SUBGRAPH));
+
+    Ort::Session session(env, "../yolo26n.onnx", sessionOptions);
+
     Ort::AllocatorWithDefaultOptions allocator;
 
     auto inputNameAllocated =
@@ -734,7 +761,7 @@ int main()
     std::cout << "Press 's' to save a frame." << std::endl;
     std::cout << "Press 'q' to quit." << std::endl;
 
-    cv::Mat frame;
+    // cv::Mat frame;
 
     // Used to print information only once
     bool firstFrame = true;
@@ -760,19 +787,41 @@ int main()
     double totalPreprocessTime = 0.0;
     int preprocessSamples = 0;
 
-    auto fpsStart = std::chrono::steady_clock::now();
-
     int frameCount1 = 0;
     double totalInferenceTime = 0.0;
 
+    std::thread camera(
+        cameraThread,
+        std::ref(cap));
+
+    auto fpsStart = std::chrono::steady_clock::now();
+    int processedFrames = 0;
     while (true)
     {
         auto frameStart = std::chrono::steady_clock::now();
 
         auto captureStart = std::chrono::steady_clock::now();
 
-        cap.read(frame);
+        // cap.read(frame);
+        cv::Mat frame;
+
+        {
+            std::lock_guard<std::mutex> lock(frameMutex);
+
+            if (!latestFrame.empty())
+            {
+                latestFrame.copyTo(frame);
+            }
+        }
+
+        if (frame.empty())
+        {
+            std::this_thread::sleep_for(
+                std::chrono::milliseconds(1));
+            continue;
+        }
         auto captureEnd = std::chrono::steady_clock::now();
+
         double captureTime =
             calculateTimeDifference(captureStart, captureEnd);
 
@@ -822,8 +871,10 @@ int main()
         auto chwStart =
             std::chrono::steady_clock::now();
 
-        std::vector<float> inputTensorValues =
-            convertHWCtoCHW(yoloFloatFrame);
+        static std::vector<cv::Mat> channelMatrices;
+        static std::vector<float> inputTensorValues;
+
+        convertHWCtoCHW(yoloFloatFrame, channelMatrices, inputTensorValues);
 
         auto chwEnd =
             std::chrono::steady_clock::now();
@@ -1275,31 +1326,59 @@ int main()
         //     3
         // );
 
-        auto displayStart =
-            std::chrono::high_resolution_clock::now();
+        auto imshowStart = std::chrono::steady_clock::now();
 
-        cv::imshow(
-            "YOLO Detection",
-            frame);
+        cv::imshow("YOLO Detection", frame);
 
-        cv::waitKey(1);
+        auto imshowEnd = std::chrono::steady_clock::now();
 
-        auto displayEnd =
-            std::chrono::high_resolution_clock::now();
+        int key = cv::waitKey(1);
 
-        double displayTime =
+        auto waitKeyEnd = std::chrono::steady_clock::now();
+
+        double imshowMs =
             std::chrono::duration<double, std::milli>(
-                displayEnd - displayStart)
+                imshowEnd - imshowStart)
                 .count();
 
-        std::cout
-            << "Display: "
-            << displayTime
-            << " ms"
-            << std::endl;
+        double waitKeyMs =
+            std::chrono::duration<double, std::milli>(
+                waitKeyEnd - imshowEnd)
+                .count();
+
+        std::cout << "imshow: " << imshowMs
+                  << " ms | waitKey: " << waitKeyMs << " ms\n";
+
+        processedFrames++;
+
+        auto now = std::chrono::steady_clock::now();
+
+        double elapsed =
+            std::chrono::duration<double>(now - fpsStart).count();
+
+        if (elapsed >= 0.5)
+        {
+            double fps = processedFrames / elapsed;
+
+            std::cout << "-------------------------------------------------------------Processing FPS: " << fps << '\n';
+
+            processedFrames = 0;
+            fpsStart = now;
+        }
+
+        // double displayTime =
+        //     std::chrono::duration<double, std::milli>(
+        //         displayEnd - displayStart)
+        //         .count();
+
+        // std::cout
+        //     << "Display: "
+        //     << displayTime
+        //     << " ms"
+            // << std::endl;
         // cv::imshow("Real-Time Vision Pipeline", frame);
 
-        char key = static_cast<char>(cv::waitKey(1));
+        // char key = static_cast<char>(cv::waitKey(1));
         auto frameEnd = std::chrono::steady_clock::now();
 
         double frameTime =
@@ -1406,8 +1485,15 @@ int main()
             break;
         }
     }
+    cameraRunning = false;
+
+    if (camera.joinable())
+    {
+        camera.join();
+    }
 
     cap.release();
+
     cv::destroyAllWindows();
 
     return 0;
