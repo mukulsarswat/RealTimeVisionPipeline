@@ -246,13 +246,6 @@ LetterboxResult prepareYOLOFrame(const cv::Mat &frame)
     int newHeight =
         static_cast<int>(frame.rows * scale);
 
-    cv::Mat resized;
-
-    cv::resize(
-        frame,
-        resized,
-        cv::Size(newWidth, newHeight));
-
     cv::Mat letterboxed(
         targetHeight,
         targetWidth,
@@ -322,7 +315,7 @@ void convertHWCtoCHW(
     {
         std::memcpy(
             chw.data() + c * channelSize,
-            channelMatrices[c].data,
+            channelMatrices[channels - 1 - c].data,
             channelSize * sizeof(float));
     }
 }
@@ -764,13 +757,11 @@ int main()
     // cv::Mat frame;
 
     // Used to print information only once
-    bool firstFrame = true;
-    int frameCount = 0;
+    // bool firstFrame = true;
+    // int frameCount = 0;
 
-    auto startTime = std::chrono::steady_clock::now();
+    // auto startTime = std::chrono::steady_clock::now();
     double totalCaptureTime = 0.0;
-    double averageCaptureTime = 0.0;
-    double fps = 0.0;
     int captureSamples = 0;
 
     // double totalGrayTime = 0.0;
@@ -784,10 +775,11 @@ int main()
 
     // double totalClaheTime = 0.0;
     // int claheSamples = 0;
-    double totalPreprocessTime = 0.0;
-    int preprocessSamples = 0;
+    // double totalPreprocessTime = 0.0;
+    // int preprocessSamples = 0;
 
-    int frameCount1 = 0;
+    int processedFrame = 0;
+    int inferenceSamples = 0;
     double totalInferenceTime = 0.0;
 
     std::thread camera(
@@ -795,7 +787,6 @@ int main()
         std::ref(cap));
 
     auto fpsStart = std::chrono::steady_clock::now();
-    int processedFrames = 0;
     while (true)
     {
         auto frameStart = std::chrono::steady_clock::now();
@@ -1031,50 +1022,8 @@ int main()
             << " ms"
             << std::endl;
         totalInferenceTime += inferenceTime;
-        frameCount1++;
-        if (frameCount1 % 30 == 0)
-        {
-            double averageInference =
-                totalInferenceTime / frameCount1;
-
-            auto now =
-                std::chrono::steady_clock::now();
-
-            double elapsedSeconds =
-                std::chrono::duration<double>(
-                    now - fpsStart)
-                    .count();
-
-            double fps =
-                frameCount1 / elapsedSeconds;
-
-            std::cout << "FPS: "
-                      << fps
-                      << " | Avg Inference: "
-                      << averageInference
-                      << " ms"
-                      << "| Inference Time: "
-                      << inferenceTime
-                      << " ms"
-                      << std::endl;
-
-            std::cout << "YOLO Preprocess: "
-                      << yoloPreprocessTime
-                      << " ms"
-                      << std::endl;
-
-            std::cout << "Letterbox: "
-                      << letterboxTime
-                      << " ms" << std::endl;
-
-            std::cout << "Float conversion: "
-                      << floatTime
-                      << " ms" << std::endl;
-
-            std::cout << "HWC -> CHW: "
-                      << chwTime
-                      << " ms" << std::endl;
-        }
+        processedFrame++;
+        inferenceSamples++;
 
         // std::cout << "Inference: "
         //           << inferenceTime
@@ -1186,137 +1135,137 @@ int main()
         //     {150, 199},
         //     {200, 255}};
 
-        frameCount++;
+        // frameCount++;
 
         // Inspect the first frame
-        if (firstFrame)
-        {
-            // printFrameInfo(frame, "Original Frame");
-            // printFrameInfo(resizedFrame, "Resized Frame");
-            // printFrameInfo(grayFrame, "Grayscale Frame");
-            // printFrameInfo(normalizedFrame, "Normalized Grayscale Frame");
-            // printFrameInfo(hsvFrame, "HSV Frame");
-            // printFrameInfo(labFrame, "LAB Frame");
-            // printFrameInfo(yoloFrame, "YOLO Input Frame");
-            // printFrameInfo(yoloFloatFrame, "YOLO Float Frame");
-            // printHistogram(originalHist, "Original");
-            // printHistogram(enhancedHist, "Enhanced");
-            // printHistogramComparison(originalHist, enhancedHist);
-            // printCLAHEStats(originalL, enhancedL);
+        // if (firstFrame)
+        // {
+        //     // printFrameInfo(frame, "Original Frame");
+        //     // printFrameInfo(resizedFrame, "Resized Frame");
+        //     // printFrameInfo(grayFrame, "Grayscale Frame");
+        //     // printFrameInfo(normalizedFrame, "Normalized Grayscale Frame");
+        //     // printFrameInfo(hsvFrame, "HSV Frame");
+        //     // printFrameInfo(labFrame, "LAB Frame");
+        //     // printFrameInfo(yoloFrame, "YOLO Input Frame");
+        //     // printFrameInfo(yoloFloatFrame, "YOLO Float Frame");
+        //     // printHistogram(originalHist, "Original");
+        //     // printHistogram(enhancedHist, "Enhanced");
+        //     // printHistogramComparison(originalHist, enhancedHist);
+        //     // printCLAHEStats(originalL, enhancedL);
 
-            // pixelValueAt(frame, 0, 0, "Original Frame");
-            // pixelValueAt(resizedFrame, 0, 0, "Resized Frame");
-            // pixelValueAt(grayFrame, 0, 0, "Grayscale Frame");
-            // pixelValueAt(normalizedFrame, 0, 0, "Normalized Grayscale Frame");
-            // pixelValueAt(hsvFrame, 0, 0, "HSV Frame");
-            // pixelValueAt(labFrame, 0, 0, "LAB Frame");
-            // std::cout << "YOLO Tensor Values: "
-            //           << inputTensorValues.size()
-            //           << std::endl;
-            // std::cout << "ONNX Tensor Created" << std::endl;
+        //     // pixelValueAt(frame, 0, 0, "Original Frame");
+        //     // pixelValueAt(resizedFrame, 0, 0, "Resized Frame");
+        //     // pixelValueAt(grayFrame, 0, 0, "Grayscale Frame");
+        //     // pixelValueAt(normalizedFrame, 0, 0, "Normalized Grayscale Frame");
+        //     // pixelValueAt(hsvFrame, 0, 0, "HSV Frame");
+        //     // pixelValueAt(labFrame, 0, 0, "LAB Frame");
+        //     // std::cout << "YOLO Tensor Values: "
+        //     //           << inputTensorValues.size()
+        //     //           << std::endl;
+        //     // std::cout << "ONNX Tensor Created" << std::endl;
 
-            // std::cout << "Detections above threshold: "
-            //           << detections.size()
-            //           << std::endl;
+        //     // std::cout << "Detections above threshold: "
+        //     //           << detections.size()
+        //     //           << std::endl;
 
-            // for (const Detection &detection : detections)
-            // {
-            //     std::cout << "Class: "
-            //               << detection.classId
-            //               << " | Confidence: "
-            //               << detection.confidence
-            //               << " | X: "
-            //               << detection.x
-            //               << " | Y: "
-            //               << detection.y
-            //               << " | W: "
-            //               << detection.width
-            //               << " | H: "
-            //               << detection.height
-            //               << std::endl;
-            // }
+        //     // for (const Detection &detection : detections)
+        //     // {
+        //     //     std::cout << "Class: "
+        //     //               << detection.classId
+        //     //               << " | Confidence: "
+        //     //               << detection.confidence
+        //     //               << " | X: "
+        //     //               << detection.x
+        //     //               << " | Y: "
+        //     //               << detection.y
+        //     //               << " | W: "
+        //     //               << detection.width
+        //     //               << " | H: "
+        //     //               << detection.height
+        //     //               << std::endl;
+        //     // }
 
-            // std::cout << "Raw detections: "
-            //           << detections.size()
-            //           << std::endl;
+        //     // std::cout << "Raw detections: "
+        //     //           << detections.size()
+        //     //           << std::endl;
 
-            // std::cout << "After NMS: "
-            //           << finalDetections.size()
-            //           << std::endl;
+        //     // std::cout << "After NMS: "
+        //     //           << finalDetections.size()
+        //     //           << std::endl;
 
-            // std::cout << "First 10 output values:" << std::endl;
+        //     // std::cout << "First 10 output values:" << std::endl;
 
-            // for (int i = 0; i < 10; ++i)
-            // {
-            //     std::cout << outputData[i] << " ";
-            // }
-            // std::cout << "\nFirst prediction:" << std::endl;
+        //     // for (int i = 0; i < 10; ++i)
+        //     // {
+        //     //     std::cout << outputData[i] << " ";
+        //     // }
+        //     // std::cout << "\nFirst prediction:" << std::endl;
 
-            // for (int i = 0; i < 84; ++i)
-            // {
-            //     std::cout << outputData[i * 8400] << " ";
-            // }
+        //     // for (int i = 0; i < 84; ++i)
+        //     // {
+        //     //     std::cout << outputData[i * 8400] << " ";
+        //     // }
 
-            // std::cout << std::endl;
-            // Detection bestDetection =
-            //     decodeBestDetection(
-            //         outputData,
-            //         8400,
-            //         80);
-            // cv::Rect originalBox =
-            //     mapDetectionToOriginalFrame(
-            //         bestDetection,
-            //         letterbox,
-            //         frame.size());
+        //     // std::cout << std::endl;
+        //     // Detection bestDetection =
+        //     //     decodeBestDetection(
+        //     //         outputData,
+        //     //         8400,
+        //     //         80);
+        //     // cv::Rect originalBox =
+        //     //     mapDetectionToOriginalFrame(
+        //     //         bestDetection,
+        //     //         letterbox,
+        //     //         frame.size());
 
-            // std::cout << "Best Detection:" << std::endl;
+        //     // std::cout << "Best Detection:" << std::endl;
 
-            // std::cout << "X: "
-            //           << bestDetection.x << std::endl;
+        //     // std::cout << "X: "
+        //     //           << bestDetection.x << std::endl;
 
-            // std::cout << "Y: "
-            //           << bestDetection.y << std::endl;
+        //     // std::cout << "Y: "
+        //     //           << bestDetection.y << std::endl;
 
-            // std::cout << "Width: "
-            //           << bestDetection.width << std::endl;
+        //     // std::cout << "Width: "
+        //     //           << bestDetection.width << std::endl;
 
-            // std::cout << "Height: "
-            //           << bestDetection.height << std::endl;
+        //     // std::cout << "Height: "
+        //     //           << bestDetection.height << std::endl;
 
-            // std::cout << "Confidence: "
-            //           << bestDetection.confidence << std::endl;
+        //     // std::cout << "Confidence: "
+        //     //           << bestDetection.confidence << std::endl;
 
-            // std::cout << "Class ID: "
-            //           << bestDetection.classId << std::endl;
+        //     // std::cout << "Class ID: "
+        //     //           << bestDetection.classId << std::endl;
 
-            // cv::Rect bestBox =
-            //     detectionToRect(bestDetection);
+        //     // cv::Rect bestBox =
+        //     //     detectionToRect(bestDetection);
 
-            // std::cout << "Box:" << std::endl;
+        //     // std::cout << "Box:" << std::endl;
 
-            // std::cout << "Left: "
-            //           << bestBox.x << std::endl;
+        //     // std::cout << "Left: "
+        //     //           << bestBox.x << std::endl;
 
-            // std::cout << "Top: "
-            //           << bestBox.y << std::endl;
+        //     // std::cout << "Top: "
+        //     //           << bestBox.y << std::endl;
 
-            // std::cout << "Width: "
-            //           << bestBox.width << std::endl;
+        //     // std::cout << "Width: "
+        //     //           << bestBox.width << std::endl;
 
-            // std::cout << "Height: "
-            //           << bestBox.height << std::endl;
-            // drawDetection(
-            //     frame,
-            //     bestDetection,
-            //     originalBox);
+        //     // std::cout << "Height: "
+        //     //           << bestBox.height << std::endl;
+        //     // drawDetection(
+        //     //     frame,
+        //     //     bestDetection,
+        //     //     originalBox);
 
-            // cv::imshow(
-            //     "YOLO Detection",
-            //     frame);
+        //     // cv::imshow(
+        //     //     "YOLO Detection",
+        //     //     frame);
 
-            std::cout << std::endl;
-            firstFrame = false;
-        }
+        //     std::cout << std::endl;
+        //     firstFrame = false;
+        // }
 
         // Display live camera
         // cv::rectangle(
@@ -1349,20 +1298,45 @@ int main()
         std::cout << "imshow: " << imshowMs
                   << " ms | waitKey: " << waitKeyMs << " ms\n";
 
-        processedFrames++;
+        // processedFrames++;
 
+        // if (elapsed >= 0.5)
+        // {
+        //     double fps = processedFrames / elapsed;
+
+        //     std::cout << "-------------------------------------------------------------Processing FPS: " << fps << '\n';
+
+        //     processedFrames = 0;
+        //     fpsStart = now1;
+        // }
         auto now = std::chrono::steady_clock::now();
 
-        double elapsed =
-            std::chrono::duration<double>(now - fpsStart).count();
+        double elapseSeconds =
+            std::chrono::duration<double>(
+                now - fpsStart)
+                .count();
 
-        if (elapsed >= 0.5)
+        double fps = 30.0 / elapseSeconds;
+
+        double averageInference =
+            totalInferenceTime / 30.0;
+
+        if (elapseSeconds >= 0.5)
         {
-            double fps = processedFrames / elapsed;
+            double fps = processedFrame / elapseSeconds;
 
-            std::cout << "-------------------------------------------------------------Processing FPS: " << fps << '\n';
+            double averageInference =
+                inferenceSamples > 0
+                    ? totalInferenceTime / inferenceSamples
+                    : 0.0;
 
-            processedFrames = 0;
+            std::cout << "Processing FPS: " << fps
+                      << " | Avg Inference: "
+                      << averageInference << " ms\n";
+
+            processedFrame = 0;
+            inferenceSamples = 0;
+            totalInferenceTime = 0.0;
             fpsStart = now;
         }
 
@@ -1375,7 +1349,7 @@ int main()
         //     << "Display: "
         //     << displayTime
         //     << " ms"
-            // << std::endl;
+        // << std::endl;
         // cv::imshow("Real-Time Vision Pipeline", frame);
 
         // char key = static_cast<char>(cv::waitKey(1));
@@ -1389,87 +1363,82 @@ int main()
 
         double elapsedSeconds =
             std::chrono::duration<double>(
-                currentTime - startTime)
+                currentTime - fpsStart)
                 .count();
-        if (frameCount1 % 30 == 0)
-        {
-            std::cout << "Total Frame Time: "
-                      << frameTime
-                      << " ms"
-                      << std::endl;
-        }
+        // if (frameCount1 % 30 == 0)
+        // {
+        //     std::cout << "Total Frame Time: "
+        //               << frameTime
+        //               << " ms"
+        //               << std::endl;
+        // }
 
-        if (elapsedSeconds >= 1.0)
-        {
-            fps = static_cast<double>(frameCount) / elapsedSeconds;
-            averageCaptureTime = captureSamples > 0 ? totalCaptureTime / captureSamples : 0.0;
+        // if (elapsedSeconds >= 1.0)
+        // {
+        //     fps = / elapsedSeconds;
+        //     averageCaptureTime = captureSamples > 0 ? totalCaptureTime / captureSamples : 0.0;
 
-            // double averageGrayTime =
-            //     graySamples > 0 ? totalGrayTime / graySamples : 0.0;
+        //     // double averageGrayTime =
+        //     //     graySamples > 0 ? totalGrayTime / graySamples : 0.0;
 
-            // std::cout << "FPS: "
-            //           << fps
-            //           << " | Avg Capture: "
-            //           << averageCaptureTime
-            //           << " ms"
-            //           << " | Avg Grayscale: "
-            //           << averageGrayTime
-            //           << " ms"
-            //           << std::endl;
+        //     // std::cout << "FPS: "
+        //     //           << fps
+        //     //           << " | Avg Capture: "
+        //     //           << averageCaptureTime
+        //     //           << " ms"
+        //     //           << " | Avg Grayscale: "
+        //     //           << averageGrayTime
+        //     //           << " ms"
+        //     //           << std::endl;
 
-            // double averageBlurTime =
-            //     blurSamples > 0 ? totalBlurTime / blurSamples : 0.0;
+        //     // double averageBlurTime =
+        //     //     blurSamples > 0 ? totalBlurTime / blurSamples : 0.0;
 
-            // std::cout << "FPS: "
-            //           << fps
-            //           << " | Avg Capture: "
-            //           << averageCaptureTime
-            //           << " ms"
-            //           << " | Avg Grayscale: "
-            //           << averageGrayTime
-            //           << " ms"
-            //           << " | Avg Blur: "
-            //           << averageBlurTime
-            //           << " ms"
-            //           << std::endl;
+        //     // std::cout << "FPS: "
+        //     //           << fps
+        //     //           << " | Avg Capture: "
+        //     //           << averageCaptureTime
+        //     //           << " ms"
+        //     //           << " | Avg Grayscale: "
+        //     //           << averageGrayTime
+        //     //           << " ms"
+        //     //           << " | Avg Blur: "
+        //     //           << averageBlurTime
+        //     //           << " ms"
+        //     //           << std::endl;
 
-            // double averageCannyTime =
-            //     cannySamples > 0 ? totalCannyTime / cannySamples : 0.0;
+        //     // double averageCannyTime =
+        //     //     cannySamples > 0 ? totalCannyTime / cannySamples : 0.0;
 
-            // std::cout << " | Avg Canny: "
-            //           << averageCannyTime
-            //           << " ms"
-            //           << std::endl;
+        //     // std::cout << " | Avg Canny: "
+        //     //           << averageCannyTime
+        //     //           << " ms"
+        //     //           << std::endl;
 
-            // double averageClaheTime =
-            //     claheSamples > 0 ? totalClaheTime / claheSamples : 0.0;
+        //     // double averageClaheTime =
+        //     //     claheSamples > 0 ? totalClaheTime / claheSamples : 0.0;
 
-            // std::cout << " | Avg CLAHE: "
-            //           << averageClaheTime
-            //           << " ms"
-            //           << std::endl;
+        //     // std::cout << " | Avg CLAHE: "
+        //     //           << averageClaheTime
+        //     //           << " ms"
+        //     //           << std::endl;
 
-            double averagePreprocessTime =
-                preprocessSamples > 0 ? totalPreprocessTime / preprocessSamples : 0.0;
+        //     // std::cout << " | Avg Preprocess: "
+        //     //           << averagePreprocessTime
+        //     //           << " ms"
+        //     //           << std::endl;
 
-            // std::cout << " | Avg Preprocess: "
-            //           << averagePreprocessTime
-            //           << " ms"
-            //           << std::endl;
-
-            // totalGrayTime = 0.0;
-            // graySamples = 0;
-            // totalBlurTime = 0.0;
-            // blurSamples = 0;
-            // totalCannyTime = 0.0;
-            // cannySamples = 0;
-            // totalClaheTime = 0.0;
-            // claheSamples = 0;
-            totalCaptureTime = 0.0;
-            captureSamples = 0;
-            totalPreprocessTime = 0.0;
-            preprocessSamples = 0;
-        }
+        //     // totalGrayTime = 0.0;
+        //     // graySamples = 0;
+        //     // totalBlurTime = 0.0;
+        //     // blurSamples = 0;
+        //     // totalCannyTime = 0.0;
+        //     // cannySamples = 0;
+        //     // totalClaheTime = 0.0;
+        //     // claheSamples = 0;
+        //     totalCaptureTime = 0.0;
+        //     captureSamples = 0;
+        // }
 
         // Save frame
         if (key == 's')

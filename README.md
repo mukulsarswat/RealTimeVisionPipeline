@@ -8,7 +8,7 @@ The application is implemented in [`src/main.cpp`](src/main.cpp) and runs these 
 
 1. **Camera capture thread**: opens camera device 0, requests 640×480 using `CAP_PROP_FRAME_WIDTH` and `CAP_PROP_FRAME_HEIGHT`, and prints the camera-reported resolution and FPS. A dedicated thread continuously reads frames and publishes the latest one; the requested mode may not be supported, so the reported properties come from the capture backend.
 2. **Frame handoff**: a mutex protects the shared latest-frame `cv::Mat` while the capture thread publishes a new frame and the processing thread copies a snapshot. The processing loop does not wait for one camera read per inference iteration; it works on the most recently available frame, and intermediate camera frames can be skipped rather than queued.
-3. **YOLO input preparation**: preserves the captured frame's aspect ratio while resizing it to fit 640×640, centers it on a value-114 letterbox, converts BGR to RGB, scales pixels to float `[0,1]`, and packs the image in NCHW order.
+3. **YOLO input preparation**: preserves the captured frame's aspect ratio while resizing it to fit 640×640, centers it on a value-114 letterbox, reverses BGR-to-RGB channel ordering during HWC-to-CHW packing, scales pixels to float `[0,1]`, and stores the image in CHW format without a separate `cv::cvtColor()` pass.
 4. **Inference and detections**: ONNX Runtime evaluates the `[1, 3, 640, 640]` input. Candidate detections are confidence-filtered and passed through NMS; remaining boxes are mapped back to the captured-frame coordinates and drawn on the live image.
 5. **Display and keyboard input**: displays the annotated frame in the `YOLO Detection` window. Press `q` to exit.
 
@@ -24,7 +24,7 @@ For every captured frame, the YOLO input is prepared as follows:
 
 1. Resize the original OpenCV BGR camera frame to fit within 640×640 while preserving its aspect ratio.
 2. Place it in the center of a 640×640 canvas filled with pixel value 114, recording the scale and padding offsets for later box-coordinate mapping.
-3. Convert the letterboxed image from BGR to RGB.
+3. Copy the letterboxed frame into channel planes while reversing the OpenCV BGR channel order to RGB as part of the HWC-to-CHW layout conversion. This avoids a separate `cv::cvtColor()` pass and still produces the expected RGB tensor input.
 4. Convert the 8-bit channel values to 32-bit floating point and divide by 255, giving values in `[0,1]`.
 5. Reorder the pixels from interleaved HWC layout (height, width, channels) to planar CHW layout (channels, height, width).
 6. Wrap those values in a float tensor with shape **`[1, 3, 640, 640]`** (batch, channels, height, width) and run the ONNX session.
@@ -186,6 +186,15 @@ FPS: 28.9618 | Avg Capture: 17.6752 ms | Avg Grayscale: 0.184088 ms | Avg Blur: 
 ## Profiling Run Screenshot
 
 The terminal screenshot supplied with the earlier project run is not included as a repository file. The three Canny output images above are the captured files available for this comparison.
+
+## Latest benchmark — 13 October 2026
+
+- Processing FPS: 39.92
+- Average inference: 10.84 ms
+- Preprocessing: 0.57–0.66 ms
+- Decode: 1.12 ms
+- NMS: approximately 0.0006 ms
+- Verified build: successful CMake configuration and build completed with `[100%] Built target vision_app`.
 
 ## Build and Run
 
