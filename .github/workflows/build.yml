@@ -1,0 +1,29 @@
+
+name: C++ Build Check
+
+'on':
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          brew install cmake opencv onnxruntime
+
+      - name: Configure CMake
+        run: cmake -S . -B build
+
+      - name: Build application
+        run: cmake --build build -j4
