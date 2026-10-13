@@ -1,3 +1,19 @@
+# Environment variables and secrets
+.env
+.env.*
+
+# Keep an example template if needed
+!.env.example
+
+# Python virtual environment and cache
+.venv/
+__pycache__/
+
+# Build artifacts
 build/
-captured_frame.jpg
+
+# macOS
 .DS_Store
+
+# Captured output
+captured_frame.jpg
